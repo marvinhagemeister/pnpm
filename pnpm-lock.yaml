@@ -345,8 +345,8 @@ importers:
         specifier: workspace:*
         version: 'link:'
       '@types/fs-extra':
-        specifier: ^11.0.1
-        version: 11.0.1
+        specifier: ^9.0.13
+        version: 9.0.13
 
   __utils__/tsconfig:
     devDependencies:
@@ -1539,8 +1539,8 @@ importers:
         specifier: workspace:*
         version: link:../../__utils__/prepare
       '@types/fs-extra':
-        specifier: ^11.0.1
-        version: 11.0.1
+        specifier: ^9.0.13
+        version: 9.0.13
 
   fs/read-modules-dir:
     dependencies:
@@ -2820,8 +2820,8 @@ importers:
         specifier: workspace:*
         version: link:../../__utils__/test-fixtures
       '@types/fs-extra':
-        specifier: ^11.0.1
-        version: 11.0.1
+        specifier: ^9.0.13
+        version: 9.0.13
       '@types/is-windows':
         specifier: ^1.0.0
         version: 1.0.0
@@ -3084,8 +3084,8 @@ importers:
         specifier: workspace:*
         version: link:../../__utils__/test-fixtures
       '@types/fs-extra':
-        specifier: ^11.0.1
-        version: 11.0.1
+        specifier: ^9.0.13
+        version: 9.0.13
       '@types/ramda':
         specifier: 0.28.20
         version: 0.28.20
@@ -8785,7 +8785,7 @@ packages:
     dependencies:
       '@types/http-cache-semantics': 4.0.1
       '@types/keyv': 3.1.4
-      '@types/node': 14.18.37
+      '@types/node': 18.15.9
       '@types/responselike': 1.0.0
 
   /@types/concat-stream@2.0.0:
@@ -8803,10 +8803,9 @@ packages:
   /@types/emscripten@1.39.6:
     resolution: {integrity: sha512-H90aoynNhhkQP6DRweEjJp5vfUVdIj7tdPLsu7pq89vODD/lcugKfZOsfgwpvM6XUewEp2N5dCg1Uf3Qe55Dcg==}
 
-  /@types/fs-extra@11.0.1:
-    resolution: {integrity: sha512-MxObHvNl4A69ofaTRU8DFqvgzzv8s9yRtaPPm5gud9HDNvpB3GPQFvNuTWAI59B9huVGV5jXYJwbCsmBsOGYWA==}
+  /@types/fs-extra@9.0.13:
+    resolution: {integrity: sha512-nEnwB++1u5lVDM2UI4c1+5R+FYaKfaAzS4OococimjVm3nQw3TuzH5UNsocrcTBbhnerblyHj4A49qXbIiZdpA==}
     dependencies:
-      '@types/jsonfile': 6.1.1
       '@types/node': 18.15.9
     dev: true
 
@@ -8814,7 +8813,7 @@ packages:
     resolution: {integrity: sha512-IO+MJPVhoqz+28h1qLAcBEH2+xHMK6MTyHJc7MTnnYb6wsoLR29POVGJ7LycmVXIqyy/4/2ShP5sUwTXuOwb/w==}
     dependencies:
       '@types/minimatch': 5.1.2
-      '@types/node': 14.18.37
+      '@types/node': 18.14.3
     dev: true
 
   /@types/graceful-fs@4.1.6:
@@ -8885,16 +8884,10 @@ packages:
     resolution: {integrity: sha512-dRLjCWHYg4oaA77cxO64oO+7JwCwnIzkZPdrrC71jQmQtlhM556pwKo5bUzqvZndkVbeFLIIi+9TC40JNF5hNQ==}
     dev: false
 
-  /@types/jsonfile@6.1.1:
-    resolution: {integrity: sha512-GSgiRCVeapDN+3pqA35IkQwasaCh/0YFH5dEF6S88iDvEn901DjOeH3/QPY+XYP1DFzDZPvIvfeEgk+7br5png==}
-    dependencies:
-      '@types/node': 18.15.9
-    dev: true
-
   /@types/keyv@3.1.4:
     resolution: {integrity: sha512-BQ5aZNSCpj7D6K2ksrRCTmKRLEpnPvWDiLPfoGyhZ++8YtiK9d/3DBKPJgry359X/P1PfruyYwvnvwFjuEiEIg==}
     dependencies:
-      '@types/node': 14.18.37
+      '@types/node': 18.15.9
 
   /@types/lodash@4.14.181:
     resolution: {integrity: sha512-n3tyKthHJbkiWhDZs3DkhkCzt2MexYHXlX0td5iMplyfwketaOeKboEVBqzceH7juqvEg3q5oUoBFxSLu7zFag==}
@@ -8974,7 +8967,7 @@ packages:
   /@types/responselike@1.0.0:
     resolution: {integrity: sha512-85Y2BjiufFzaMIlvJDvTTB8Fxl2xfLo4HgmHzVBz08w4wDePCTjYw66PdrolO0kzli3yam/YCgRufyo1DdQVTA==}
     dependencies:
-      '@types/node': 14.18.37
+      '@types/node': 18.15.9
 
   /@types/retry@0.12.2:
     resolution: {integrity: sha512-XISRgDJ2Tc5q4TRqvgJtzsRkFYNJzZrhTdtMoGVBttwzzQJkPnS3WWTFc7kuDRoPtPakl+T+OfdEUjYJj7Jbow==}
@@ -17439,7 +17432,7 @@ packages:
   /write-file-atomic@2.4.3:
     resolution: {integrity: sha512-GaETH5wwsX+GcnzhPgKcKjJ6M2Cq3/iZp1WyY/X1CSqrW+jVNM9Y7D8EC2sM4ZG/V8wZlSniJnCKWPmBYAucRQ==}
     dependencies:
-      graceful-fs: 4.2.11
+      graceful-fs: 4.2.10
       imurmurhash: 0.1.4
       signal-exit: 3.0.7
 
@@ -17698,7 +17691,7 @@ time:
   /@pnpm/ramda@0.28.1: '2022-08-03T13:56:59.597Z'
   /@pnpm/registry-mock@3.8.0: '2023-03-25T20:52:46.924Z'
   /@types/byline@4.2.33: '2021-07-06T18:22:06.440Z'
-  /@types/fs-extra@11.0.1: '2023-01-10T19:32:56.188Z'
+  /@types/fs-extra@9.0.13: '2021-09-21T19:02:27.512Z'
   /@types/jest@29.5.0: '2023-03-16T17:02:40.421Z'
   /@types/table@6.0.0: '2020-09-17T17:56:44.787Z'
   /@typescript-eslint/eslint-plugin@5.56.0: '2023-03-20T17:18:30.973Z'
