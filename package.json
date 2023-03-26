@@ -66,14 +66,11 @@
   "packageManager": "pnpm@8.0.0-beta.0",
   "pnpm": {
     "overrides": {
-      "@yarnpkg/fslib": "3.0.0-rc.25",
-      "@yarnpkg/libzip": "3.0.0-rc.25",
       "glob-parent@<5.1.2": ">=5.1.2",
       "hosted-git-info@4": "npm:@zkochan/hosted-git-info@^4.0.2",
       "istanbul-reports": "npm:@zkochan/istanbul-reports",
       "js-yaml@^4.0.0": "npm:@zkochan/js-yaml@0.0.6",
       "nopt@5": "npm:@pnpm/nopt@^0.2.1",
-      "clipanion": "3.2.0-rc.6",
       "jsonwebtoken@<=8.5.1": ">=9.0.0",
       "json5@<2.2.2": ">=2.2.2",
       "debug@<3.1.0": ">=3.1.0",
