@@ -3558,8 +3558,8 @@ importers:
         specifier: ^1.1.0
         version: 1.1.0
       '@yarnpkg/parsers':
-        specifier: 3.0.0-rc.27
-        version: 3.0.0-rc.27
+        specifier: 3.0.0-rc.40
+        version: 3.0.0-rc.40
       '@zkochan/rimraf':
         specifier: ^2.1.2
         version: 2.1.2
@@ -3716,8 +3716,8 @@ importers:
         specifier: workspace:*
         version: link:../../lockfile/lockfile-utils
       '@yarnpkg/nm':
-        specifier: 4.0.0-rc.27
-        version: 4.0.0-rc.27(typanion@3.12.1)
+        specifier: 4.0.0-rc.40
+        version: 4.0.0-rc.40(typanion@3.12.1)
     devDependencies:
       '@pnpm/lockfile-file':
         specifier: workspace:*
@@ -9348,7 +9348,7 @@ packages:
       '@types/treeify': 1.0.0
       '@yarnpkg/fslib': 3.0.0-rc.25
       '@yarnpkg/libzip': 3.0.0-rc.25(@yarnpkg/fslib@3.0.0-rc.25)
-      '@yarnpkg/parsers': 3.0.0-rc.39
+      '@yarnpkg/parsers': 3.0.0-rc.40
       '@yarnpkg/shell': 4.0.0-rc.39(typanion@3.12.1)
       camelcase: 5.3.1
       chalk: 3.0.0
@@ -9370,6 +9370,40 @@ packages:
       tunnel: 0.0.6
     transitivePeerDependencies:
       - typanion
+
+  /@yarnpkg/core@4.0.0-rc.40(typanion@3.12.1):
+    resolution: {integrity: sha512-f3+HuJ2YvN9mz1oPe2abrtQS6X/14fQndibA+0jzRxyBumtJT7LwMRlWQI9y0gz2ZwygpfQ4m3lLvbC0fzSwdg==}
+    engines: {node: '>=14.15.0'}
+    dependencies:
+      '@arcanis/slice-ansi': 1.1.1
+      '@types/lodash': 4.14.181
+      '@types/semver': 7.3.13
+      '@types/treeify': 1.0.0
+      '@yarnpkg/fslib': 3.0.0-rc.25
+      '@yarnpkg/libzip': 3.0.0-rc.25(@yarnpkg/fslib@3.0.0-rc.25)
+      '@yarnpkg/parsers': 3.0.0-rc.40
+      '@yarnpkg/shell': 4.0.0-rc.40(typanion@3.12.1)
+      camelcase: 5.3.1
+      chalk: 3.0.0
+      ci-info: 3.8.0
+      clipanion: 3.2.0-rc.6(typanion@3.12.1)
+      cross-spawn: 7.0.3
+      diff: 5.1.0
+      globby: 11.1.0
+      got: 11.8.6
+      lodash: 4.17.21
+      micromatch: 4.0.5
+      p-limit: 2.3.0
+      semver: 7.3.8
+      strip-ansi: 6.0.1
+      tar: 6.1.13
+      tinylogic: 2.0.0
+      treeify: 1.1.0
+      tslib: 2.5.0
+      tunnel: 0.0.6
+    transitivePeerDependencies:
+      - typanion
+    dev: false
 
   /@yarnpkg/extensions@2.0.0-rc.22(@yarnpkg/core@4.0.0-rc.27):
     resolution: {integrity: sha512-8Xh1hdaRtZq68kbUIlvq7jWgG/ofe0skwbC0d6l+ymRFxinv517DirRK430Vhg1HvM6eCO91PEYD7Cl0HwZ2OQ==}
@@ -9417,6 +9451,18 @@ packages:
       '@yarnpkg/pnp': 4.0.0-rc.40
     transitivePeerDependencies:
       - typanion
+    dev: true
+
+  /@yarnpkg/nm@4.0.0-rc.40(typanion@3.12.1):
+    resolution: {integrity: sha512-BaAkwx6HqIDgmytp6OfYf+1egFYqRPpVgu3zq3OAN3BQw16hs6cec6mk8nPQCD/E+6NgEyRG8Ptyh4zUHuADqw==}
+    engines: {node: '>=14.15.0'}
+    dependencies:
+      '@yarnpkg/core': 4.0.0-rc.40(typanion@3.12.1)
+      '@yarnpkg/fslib': 3.0.0-rc.25
+      '@yarnpkg/pnp': 4.0.0-rc.40
+    transitivePeerDependencies:
+      - typanion
+    dev: false
 
   /@yarnpkg/parsers@2.5.1:
     resolution: {integrity: sha512-KtYN6Ez3x753vPF9rETxNTPnPjeaHY11Exlpqb4eTII7WRlnGiZ5rvvQBau4R20Ik5KBv+vS3EJEcHyCunwzzw==}
@@ -9425,16 +9471,16 @@ packages:
       js-yaml: 3.14.1
       tslib: 1.14.1
 
-  /@yarnpkg/parsers@3.0.0-rc.27:
-    resolution: {integrity: sha512-qs2wZulOYVjaOS6tYOs3SsR7m/qeHwjPrB5i4JtBJELsgWrEkyL+rJH21RA+fVwttJobAYQqw5Xj5SYLaDK/bQ==}
+  /@yarnpkg/parsers@3.0.0-rc.39:
+    resolution: {integrity: sha512-BsD4zq3EVmaHqlynXTceNuEFAtrfToV4fI9GA54moKlWZL4Eb2eXrhgf1jV2nMYx18SZxYO4Jc5Kf1sCDNRjOg==}
     engines: {node: '>=14.15.0'}
     dependencies:
       js-yaml: 3.14.1
       tslib: 2.5.0
-    dev: false
+    dev: true
 
-  /@yarnpkg/parsers@3.0.0-rc.39:
-    resolution: {integrity: sha512-BsD4zq3EVmaHqlynXTceNuEFAtrfToV4fI9GA54moKlWZL4Eb2eXrhgf1jV2nMYx18SZxYO4Jc5Kf1sCDNRjOg==}
+  /@yarnpkg/parsers@3.0.0-rc.40:
+    resolution: {integrity: sha512-sKbi5XhHKXCjzb5m0ftGuQuODM2iUXEsrCSl8MkKexNWHepCmU3IPaGTPC5gHZy4sOvsb9JqTLaZEez+kDzG+Q==}
     engines: {node: '>=14.15.0'}
     dependencies:
       js-yaml: 3.14.1
@@ -9478,7 +9524,7 @@ packages:
     hasBin: true
     dependencies:
       '@yarnpkg/fslib': 3.0.0-rc.25
-      '@yarnpkg/parsers': 3.0.0-rc.39
+      '@yarnpkg/parsers': 3.0.0-rc.40
       chalk: 3.0.0
       clipanion: 3.2.0-rc.6(typanion@3.12.1)
       cross-spawn: 7.0.3
@@ -9487,6 +9533,23 @@ packages:
       tslib: 2.5.0
     transitivePeerDependencies:
       - typanion
+
+  /@yarnpkg/shell@4.0.0-rc.40(typanion@3.12.1):
+    resolution: {integrity: sha512-2glHpyln7SdnYKKsdge8eLxwdhCDVLUpe0WiqjIG7bZgEZhCFDqkE1TyZ/LB+/hx+E6alEkpRuxei9L+yIaUpg==}
+    engines: {node: '>=14.15.0'}
+    hasBin: true
+    dependencies:
+      '@yarnpkg/fslib': 3.0.0-rc.25
+      '@yarnpkg/parsers': 3.0.0-rc.40
+      chalk: 3.0.0
+      clipanion: 3.2.0-rc.6(typanion@3.12.1)
+      cross-spawn: 7.0.3
+      fast-glob: 3.2.12
+      micromatch: 4.0.5
+      tslib: 2.5.0
+    transitivePeerDependencies:
+      - typanion
+    dev: false
 
   /@zkochan/cmd-shim@6.0.0:
     resolution: {integrity: sha512-kLBj0hJjqIw/KkIs8tvFaG1AY/yX2iUJqj47Jgoo5WoeQJd552ijJsj4GAOQnmyfoFLLEKZ+aSYfCpMjyg2hJw==}
@@ -17640,6 +17703,8 @@ time:
   /@types/table@6.0.0: '2020-09-17T17:56:44.787Z'
   /@typescript-eslint/eslint-plugin@5.56.0: '2023-03-20T17:18:30.973Z'
   /@typescript-eslint/parser@5.56.0: '2023-03-20T17:18:00.393Z'
+  /@yarnpkg/nm@4.0.0-rc.40: '2023-03-05T16:49:50.542Z'
+  /@yarnpkg/parsers@3.0.0-rc.40: '2023-03-05T16:48:12.889Z'
   /@zkochan/hosted-git-info@4.0.2: '2021-09-05T21:33:51.709Z'
   /@zkochan/js-yaml@0.0.6: '2022-05-10T14:42:39.813Z'
   /esbuild@0.17.13: '2023-03-24T18:57:51.525Z'

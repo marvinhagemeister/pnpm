@@ -86,7 +86,7 @@
     "@pnpm/workspace.pkgs-graph": "workspace:*",
     "@yarnpkg/core": "4.0.0-rc.27",
     "@yarnpkg/lockfile": "^1.1.0",
-    "@yarnpkg/parsers": "3.0.0-rc.27",
+    "@yarnpkg/parsers": "3.0.0-rc.40",
     "@zkochan/rimraf": "^2.1.2",
     "@zkochan/table": "^2.0.1",
     "@zkochan/which": "^2.0.3",
