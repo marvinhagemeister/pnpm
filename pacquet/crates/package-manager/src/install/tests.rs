@@ -1,4 +1,4 @@
-use super::{Install, InstallError};
+use super::{Install, InstallError, load_workspace_projects};
 use pacquet_config::Config;
 use pacquet_lockfile::Lockfile;
 use pacquet_modules_yaml::{
@@ -20,9 +20,42 @@ use pacquet_workspace_state::{
     self as workspace_state, NodeLinker as WorkspaceStateNodeLinker, load_workspace_state,
 };
 use pipe_trait::Pipe;
-use std::sync::Mutex;
+use std::{fs, sync::Mutex};
 use tempfile::tempdir;
 use text_block_macros::text_block;
+
+#[test]
+fn workspace_without_packages_field_enumerates_root_only() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"name":"root","version":"0.0.0","scripts":{"prepare":"node root.js"}}"#,
+    )
+    .expect("write root package.json");
+    let nested = dir.path().join("test-e2e/fixtures/vendor/preact/.cache/10.10.2");
+    fs::create_dir_all(&nested).expect("mkdir vendored package");
+    fs::write(
+        nested.join("package.json"),
+        r#"{"name":"preact","version":"10.10.2","scripts":{"prepare":"run-s build"}}"#,
+    )
+    .expect("write vendored package.json");
+    fs::write(dir.path().join("pnpm-workspace.yaml"), "allowBuilds:\n  esbuild: false\n")
+        .expect("write settings-only workspace manifest");
+
+    let manifest = pacquet_workspace::read_workspace_manifest(dir.path())
+        .expect("read workspace manifest")
+        .expect("workspace manifest present");
+
+    let projects = load_workspace_projects(dir.path(), Some(&manifest))
+        .expect("load workspace projects")
+        .expect("workspace projects");
+    let names: Vec<&str> = projects
+        .iter()
+        .filter_map(|project| project.manifest.value().get("name").and_then(|name| name.as_str()))
+        .collect();
+
+    assert_eq!(names, vec!["root"]);
+}
 
 #[tokio::test]
 async fn should_install_dependencies() {

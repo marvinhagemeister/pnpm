@@ -49,12 +49,13 @@ pub struct WorkspaceManifest {
     /// the workspace dir.
     ///
     /// `Option` rather than `Vec` so callers can distinguish three
-    /// states: `None` (the `packages` key is absent — fall back to the
-    /// default `['.', '**']` patterns, matching upstream's
-    /// `opts.patterns ?? defaults`), `Some(vec![])` (explicit empty
-    /// array — enumerate only the workspace root), and `Some(...)`
-    /// (the user's patterns). Collapsing the first two would silently
-    /// promote `packages: []` into a recursive scan.
+    /// states: `None` (the `packages` key is absent), `Some(vec![])`
+    /// (explicit empty array), and `Some(...)` (the user's patterns).
+    /// The install path maps `None` to `['.']`, matching pnpm's
+    /// config-reader `workspacePackagePatterns` default, while direct
+    /// `findPackages`-style callers can still choose the lower-level
+    /// recursive default. Collapsing the first two would silently lose
+    /// the difference between omitted and explicitly-empty `packages`.
     #[serde(default)]
     pub packages: Option<Vec<String>>,
 

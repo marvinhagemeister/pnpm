@@ -1449,7 +1449,15 @@ fn load_workspace_projects(
 ) -> Result<Option<Vec<pacquet_workspace::Project>>, pacquet_workspace::FindWorkspaceProjectsError>
 {
     let Some(manifest) = workspace_manifest else { return Ok(None) };
-    let opts = pacquet_workspace::FindWorkspaceProjectsOpts { patterns: manifest.packages.clone() };
+    // pnpm's config reader resolves `workspacePackagePatterns` as
+    // `cliOptions['workspace-packages'] ?? workspaceManifest?.packages ?? ['.']`.
+    // A settings-only `pnpm-workspace.yaml` is therefore a workspace,
+    // but it only enumerates the root importer. Passing `None` through
+    // to `find_workspace_projects` would hit that helper's lower-level
+    // `findPackages()` default (`['.', '**']`) and accidentally treat
+    // vendored fixtures as workspace projects.
+    let patterns = manifest.packages.clone().or_else(|| Some(vec![".".to_string()]));
+    let opts = pacquet_workspace::FindWorkspaceProjectsOpts { patterns };
     pacquet_workspace::find_workspace_projects(workspace_root, &opts).map(Some)
 }
 
