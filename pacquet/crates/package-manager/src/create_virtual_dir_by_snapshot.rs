@@ -45,6 +45,7 @@ pub struct CreateVirtualDirBySnapshot<'a> {
     /// `packageId`) but kept here so future progress channels (e.g.
     /// per-package counts) can read it without rethreading.
     pub package_id: &'a str,
+    pub package_tree_dir: Option<PathBuf>,
     pub package_key: &'a PackageKey,
     pub snapshot: &'a SnapshotEntry,
     /// Snapshots whose slots were not materialized on this host —
@@ -85,6 +86,7 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
             logged_methods,
             requester,
             package_id: _package_id,
+            package_tree_dir,
             package_key,
             snapshot,
             skipped,
@@ -114,7 +116,7 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
                     import_method,
                     &save_path,
                     cas_paths,
-                    ImportIndexedDirOpts::default(),
+                    ImportIndexedDirOpts { package_tree_dir, ..ImportIndexedDirOpts::default() },
                 )
                 .map_err(CreateVirtualDirError::ImportIndexedDir)
             },

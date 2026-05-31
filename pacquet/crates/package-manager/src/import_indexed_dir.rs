@@ -1,8 +1,9 @@
-use crate::{LinkFileError, import_into_fresh_target};
+use crate::{LinkFileError, import_into_fresh_target, link_file::log_package_import_method_once};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pacquet_config::PackageImportMethod;
-use pacquet_reporter::Reporter;
+use pacquet_crypto_hash::create_short_hash;
+use pacquet_reporter::{PackageImportMethod as WireImportMethod, Reporter};
 use rayon::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -12,6 +13,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(target_os = "macos")]
+use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
 /// Options for [`import_indexed_dir`].
 ///
 /// Mirrors pnpm v11's `ImportOptions` at
@@ -19,7 +23,7 @@ use std::{
 /// consumes today. The defaults match the isolated linker's call
 /// shape (no force, no nested-modules preservation); the hoisted
 /// linker passes both flags set to `true`.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct ImportIndexedDirOpts {
     /// When `true`, re-import even when `dir_path` already exists,
     /// overwriting the existing contents. Without `force`, an
@@ -34,6 +38,10 @@ pub struct ImportIndexedDirOpts {
     /// installed by a sibling pass must not be clobbered when the
     /// parent package is re-imported.
     pub keep_modules_dir: bool,
+    /// Optional package-shaped cache directory. On macOS, pacquet can
+    /// clone this directory into a fresh target with one APFS
+    /// `clonefile` call, avoiding one import syscall per file.
+    pub package_tree_dir: Option<PathBuf>,
 }
 
 /// Error type for [`import_indexed_dir`].
@@ -140,7 +148,20 @@ pub fn import_indexed_dir<Reporter: self::Reporter>(
     match (existing_kind, opts.force) {
         // Fresh target — populate it. Both linkers take this path on
         // first install.
-        (None, _) => populate_dir::<Reporter>(logged_methods, import_method, dir_path, cas_paths),
+        (None, _) => {
+            if let Some(package_tree_dir) = opts.package_tree_dir.as_deref()
+                && try_populate_from_package_tree::<Reporter>(
+                    logged_methods,
+                    import_method,
+                    dir_path,
+                    cas_paths,
+                    package_tree_dir,
+                )
+            {
+                return Ok(());
+            }
+            populate_dir::<Reporter>(logged_methods, import_method, dir_path, cas_paths)
+        }
         // Existing target with force=false — pnpm's pre-existence
         // short-circuit. The isolated linker relies on this: each
         // virtual-store slot is populated exactly once.
@@ -152,6 +173,17 @@ pub fn import_indexed_dir<Reporter: self::Reporter>(
             remove_non_dir_dirent(dir_path, file_type).map_err(|error| {
                 ImportIndexedDirError::ClearNonDirEntry { path: dir_path.to_path_buf(), error }
             })?;
+            if let Some(package_tree_dir) = opts.package_tree_dir.as_deref()
+                && try_populate_from_package_tree::<Reporter>(
+                    logged_methods,
+                    import_method,
+                    dir_path,
+                    cas_paths,
+                    package_tree_dir,
+                )
+            {
+                return Ok(());
+            }
             populate_dir::<Reporter>(logged_methods, import_method, dir_path, cas_paths)
         }
         // Existing directory with force=true — stage and swap.
@@ -224,6 +256,156 @@ fn populate_dir<Reporter: self::Reporter>(
             )
         })
         .map_err(ImportIndexedDirError::LinkFile)
+}
+
+pub(crate) fn package_tree_dir(store_root: &Path, package_id: &str) -> PathBuf {
+    store_root.join("package-trees").join(create_short_hash(package_id))
+}
+
+fn try_populate_from_package_tree<Reporter: self::Reporter>(
+    logged_methods: &AtomicU8,
+    import_method: PackageImportMethod,
+    dir_path: &Path,
+    cas_paths: &HashMap<String, PathBuf>,
+    package_tree_dir: &Path,
+) -> bool {
+    if !package_tree_supported(import_method) {
+        return false;
+    }
+
+    let fingerprint = package_tree_fingerprint(cas_paths);
+    let package_tree_dir = package_tree_dir.join(&fingerprint);
+    if !matches!(
+        fs::read_to_string(package_tree_dir.join(".initialized")),
+        Ok(existing) if existing == fingerprint
+    ) && let Err(error) = build_package_tree::<Reporter>(
+        logged_methods,
+        import_method,
+        cas_paths,
+        &package_tree_dir,
+        &fingerprint,
+    ) {
+        tracing::debug!(
+            target: "pacquet::import_indexed_dir",
+            ?package_tree_dir,
+            ?error,
+            "failed to build package tree cache; falling back to per-file import",
+        );
+        return false;
+    }
+
+    let files_dir = package_tree_dir.join("files");
+    match clone_package_tree(&files_dir, dir_path) {
+        Ok(()) => {
+            log_package_import_method_once::<Reporter>(logged_methods, WireImportMethod::Clone);
+            true
+        }
+        Err(error) => {
+            tracing::debug!(
+                target: "pacquet::import_indexed_dir",
+                ?files_dir,
+                ?dir_path,
+                ?error,
+                "failed to clone package tree cache; falling back to per-file import",
+            );
+            false
+        }
+    }
+}
+
+fn package_tree_supported(import_method: PackageImportMethod) -> bool {
+    cfg!(target_os = "macos")
+        && matches!(
+            import_method,
+            PackageImportMethod::Auto
+                | PackageImportMethod::Clone
+                | PackageImportMethod::CloneOrCopy
+        )
+}
+
+fn build_package_tree<Reporter: self::Reporter>(
+    logged_methods: &AtomicU8,
+    import_method: PackageImportMethod,
+    cas_paths: &HashMap<String, PathBuf>,
+    package_tree_dir: &Path,
+    fingerprint: &str,
+) -> io::Result<()> {
+    if let Some(parent) = package_tree_dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let stage = pick_stage_path(package_tree_dir);
+    let stage_files = stage.join("files");
+    if let Err(error) =
+        populate_dir::<Reporter>(logged_methods, import_method, &stage_files, cas_paths)
+    {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(io::Error::other(error.to_string()));
+    }
+    fs::write(stage.join(".initialized"), fingerprint)?;
+    match fs::rename(&stage, package_tree_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if let Err(remove_error) = fs::remove_dir_all(package_tree_dir)
+                && remove_error.kind() != io::ErrorKind::NotFound
+            {
+                let _ = fs::remove_dir_all(&stage);
+                return Err(remove_error);
+            }
+            match fs::rename(&stage, package_tree_dir) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_dir_all(&stage);
+                    Ok(())
+                }
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&stage);
+                    Err(error)
+                }
+            }
+        }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&stage);
+            Err(error)
+        }
+    }
+}
+
+fn package_tree_fingerprint(cas_paths: &HashMap<String, PathBuf>) -> String {
+    let mut entries: Vec<_> =
+        cas_paths.iter().map(|(rel, path)| format!("{rel}\0{}", path.display())).collect();
+    entries.sort_unstable();
+    create_short_hash(&entries.join("\0"))
+}
+
+#[cfg(target_os = "macos")]
+fn clone_package_tree(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    clonefile(from, to)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clone_package_tree(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "package tree clone is only enabled on macOS"))
+}
+
+#[cfg(target_os = "macos")]
+fn clonefile(from: &Path, to: &Path) -> io::Result<()> {
+    unsafe extern "C" {
+        fn clonefile(src: *const libc::c_char, dst: *const libc::c_char, flags: u32)
+        -> libc::c_int;
+    }
+
+    let from = CString::new(from.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "destination path contains NUL")
+    })?;
+    // SAFETY: both pointers are NUL-terminated C strings alive for
+    // the duration of the call, and flags=0 is clonefile's default.
+    let rc = unsafe { clonefile(from.as_ptr(), to.as_ptr(), 0) };
+    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
 fn stage_and_swap<Reporter: self::Reporter>(

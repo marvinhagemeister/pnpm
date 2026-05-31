@@ -268,7 +268,7 @@ fn import_node<Reporter: self::Reporter>(
         opts.import_method,
         &node.dir,
         cas_paths,
-        ImportIndexedDirOpts { force: true, keep_modules_dir: true },
+        ImportIndexedDirOpts { force: true, keep_modules_dir: true, package_tree_dir: None },
     )
     .map_err(LinkHoistedModulesError::ImportIndexedDir)
 }

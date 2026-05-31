@@ -1,6 +1,6 @@
 use crate::{
     ImportIndexedDirError, ImportIndexedDirOpts, SymlinkPackageError, import_indexed_dir,
-    retry_config::retry_opts_from_config, symlink_package,
+    import_indexed_dir::package_tree_dir, retry_config::retry_opts_from_config, symlink_package,
 };
 use derive_more::{Display, Error};
 use miette::Diagnostic;
@@ -147,6 +147,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
         if first_visit {
             let (tarball_url, integrity) = extract_tarball(&resolution.resolution)?;
             let unpacked_size = manifest_unpacked_size(resolution.manifest.as_deref());
+            let package_tree_dir = package_tree_dir(config.store_dir.root(), &package_id);
 
             // `pnpm:progress resolved` mirrors pnpm's emit at
             // <https://github.com/pnpm/pnpm/blob/086c5e91e8/installing/deps-resolver/src/resolveDependencies.ts#L1586>:
@@ -179,6 +180,7 @@ impl<'a> InstallPackageFromRegistry<'a> {
                 retry_opts: retry_opts_from_config(config),
                 auth_headers: &config.auth_headers,
                 ignore_file_pattern: None,
+                package_tree_dir: Some(package_tree_dir.clone()),
                 offline: config.offline,
             }
             .run_with_mem_cache::<Reporter>(tarball_mem_cache)
@@ -192,7 +194,10 @@ impl<'a> InstallPackageFromRegistry<'a> {
                 config.package_import_method,
                 &save_path,
                 &cas_paths,
-                ImportIndexedDirOpts::default(),
+                ImportIndexedDirOpts {
+                    package_tree_dir: Some(package_tree_dir),
+                    ..ImportIndexedDirOpts::default()
+                },
             )
             .map_err(InstallPackageFromRegistryError::ImportIndexedDir)?;
 

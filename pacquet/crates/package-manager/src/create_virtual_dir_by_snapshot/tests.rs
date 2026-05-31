@@ -72,6 +72,7 @@ async fn run_emits_imported_event_after_import_indexed_dir() {
         logged_methods: &logged_methods,
         requester: "/proj",
         package_id: "react@18.0.0",
+        package_tree_dir: None,
         package_key: &package_key,
         snapshot: &snapshot,
         skipped: &skipped,

@@ -26,10 +26,13 @@ fn cas_map(entries: &[(&str, PathBuf)]) -> HashMap<String, PathBuf> {
 /// Force re-imports both with and without `keep_modules_dir` go down
 /// the same stage-and-swap path. Bundle them here so the call sites
 /// stay terse.
-const FORCE_KEEP: ImportIndexedDirOpts =
-    ImportIndexedDirOpts { force: true, keep_modules_dir: true };
-const FORCE_ONLY: ImportIndexedDirOpts =
-    ImportIndexedDirOpts { force: true, keep_modules_dir: false };
+fn force_keep() -> ImportIndexedDirOpts {
+    ImportIndexedDirOpts { force: true, keep_modules_dir: true, package_tree_dir: None }
+}
+
+fn force_only() -> ImportIndexedDirOpts {
+    ImportIndexedDirOpts { force: true, keep_modules_dir: false, package_tree_dir: None }
+}
 
 /// Smoke test: with no existing target and default opts (matching the
 /// isolated linker's call shape), populate the directory like
@@ -120,7 +123,7 @@ fn force_keep_replaces_files_and_preserves_node_modules() {
         PackageImportMethod::Copy,
         &target,
         &cas,
-        FORCE_KEEP,
+        force_keep(),
     )
     .expect("overwrite should succeed");
 
@@ -157,7 +160,7 @@ fn force_without_keep_clobbers_node_modules() {
         PackageImportMethod::Copy,
         &target,
         &cas,
-        FORCE_ONLY,
+        force_only(),
     )
     .expect("force overwrite should succeed");
 
@@ -190,7 +193,7 @@ fn force_keep_without_node_modules_replaces_cleanly() {
         PackageImportMethod::Copy,
         &target,
         &cas,
-        FORCE_KEEP,
+        force_keep(),
     )
     .expect("overwrite should succeed");
 
@@ -219,7 +222,7 @@ fn force_replaces_regular_file_target() {
         PackageImportMethod::Copy,
         &target,
         &cas,
-        FORCE_KEEP,
+        force_keep(),
     )
     .expect("regular-file target should be replaced");
 
@@ -252,7 +255,7 @@ fn force_replaces_symlink_target_without_following() {
         PackageImportMethod::Copy,
         &target,
         &cas,
-        FORCE_KEEP,
+        force_keep(),
     )
     .expect("symlink target should be replaced");
 
@@ -314,7 +317,7 @@ fn node_modules_collision_in_file_map_errors() {
         PackageImportMethod::Copy,
         &target,
         &cas,
-        FORCE_KEEP,
+        force_keep(),
     )
     .expect_err("collision should surface");
     assert!(matches!(err, ImportIndexedDirError::NodeModulesCollision { .. }), "got: {err:?}");
@@ -349,7 +352,7 @@ fn hardlink_method_survives_staging_swap() {
         PackageImportMethod::Hardlink,
         &target,
         &cas,
-        FORCE_KEEP,
+        force_keep(),
     )
     .expect("hardlink import should succeed on same-FS tempdir");
 
@@ -399,7 +402,7 @@ fn remove_dir_all_failure_restores_preserved_node_modules() {
         PackageImportMethod::Copy,
         &target,
         &cas,
-        FORCE_KEEP,
+        force_keep(),
     )
     .expect_err("RemoveExisting should fire");
 
@@ -464,7 +467,7 @@ fn node_modules_inspect_permission_denied_surfaces() {
         PackageImportMethod::Copy,
         &target,
         &cas,
-        FORCE_KEEP,
+        force_keep(),
     )
     .expect_err("InspectTarget should fire");
 
@@ -512,7 +515,7 @@ fn concurrent_force_imports_into_different_targets_do_not_collide() {
                 PackageImportMethod::Copy,
                 &target_a,
                 &cas_a,
-                FORCE_KEEP,
+                force_keep(),
             )
             .expect("a should succeed");
         });
@@ -522,7 +525,7 @@ fn concurrent_force_imports_into_different_targets_do_not_collide() {
                 PackageImportMethod::Copy,
                 &target_b,
                 &cas_b,
-                FORCE_KEEP,
+                force_keep(),
             )
             .expect("b should succeed");
         });

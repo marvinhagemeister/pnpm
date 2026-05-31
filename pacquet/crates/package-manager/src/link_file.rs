@@ -100,6 +100,18 @@ fn log_method_once<Reporter: self::Reporter>(
     }
 }
 
+pub(crate) fn log_package_import_method_once<Reporter: self::Reporter>(
+    logged: &AtomicU8,
+    method: WireImportMethod,
+) {
+    let flag = match method {
+        WireImportMethod::Clone => LOG_FLAG_CLONE,
+        WireImportMethod::Hardlink => LOG_FLAG_HARDLINK,
+        WireImportMethod::Copy => LOG_FLAG_COPY,
+    };
+    log_method_once::<Reporter>(logged, flag, method);
+}
+
 /// Materialize a CAFS file into `target_link` using `method`.
 ///
 /// * If `target_link` already exists, do nothing.

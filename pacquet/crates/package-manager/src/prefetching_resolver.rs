@@ -241,6 +241,7 @@ impl<Reporter: self::Reporter + 'static> PrefetchingResolver<Reporter> {
                 retry_opts,
                 auth_headers: &auth_headers,
                 ignore_file_pattern: None,
+                package_tree_dir: None,
                 offline,
             }
             .run_with_mem_cache::<SilentReporter>(&mem_cache)

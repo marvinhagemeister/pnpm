@@ -1,6 +1,7 @@
 use crate::{
     CasPathsByPkgId, InstallPackageBySnapshot, InstallPackageBySnapshotError, SkippedSnapshots,
-    install_package_by_snapshot::host_platform_selector, store_init::init_store_dir_best_effort,
+    import_indexed_dir::package_tree_dir, install_package_by_snapshot::host_platform_selector,
+    store_init::init_store_dir_best_effort,
 };
 use derive_more::{Display, Error};
 use futures_util::future;
@@ -673,6 +674,10 @@ impl<'a> CreateVirtualStore<'a> {
                         logged_methods,
                         requester,
                         package_id: &package_id,
+                        package_tree_dir: Some(package_tree_dir(
+                            config.store_dir.root(),
+                            &package_id,
+                        )),
                         package_key: snapshot_key,
                         snapshot,
                         skipped,

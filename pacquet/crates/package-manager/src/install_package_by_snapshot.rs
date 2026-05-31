@@ -1,6 +1,6 @@
 use crate::{
     AllowBuildPolicy, CreateVirtualDirBySnapshot, CreateVirtualDirError, VirtualStoreLayout,
-    retry_config::retry_opts_from_config,
+    import_indexed_dir::package_tree_dir, retry_config::retry_opts_from_config,
 };
 use derive_more::{Display, Error};
 use miette::Diagnostic;
@@ -273,6 +273,7 @@ impl<'a> InstallPackageBySnapshot<'a> {
                     retry_opts: retry_opts_from_config(config),
                     auth_headers: &config.auth_headers,
                     ignore_file_pattern: None,
+                    package_tree_dir: Some(package_tree_dir(config.store_dir.root(), &package_id)),
                     offline: config.offline,
                 }
                 .run_without_mem_cache::<Reporter>()
@@ -485,6 +486,7 @@ impl<'a> InstallPackageBySnapshot<'a> {
                 logged_methods,
                 requester,
                 package_id: &package_id,
+                package_tree_dir: Some(package_tree_dir(config.store_dir.root(), &package_id)),
                 package_key,
                 snapshot,
                 skipped,
@@ -695,6 +697,7 @@ async fn fetch_binary_resolution_to_cas<Reporter: self::Reporter>(
             retry_opts: retry_opts_from_config(config),
             auth_headers: &config.auth_headers,
             ignore_file_pattern,
+            package_tree_dir: None,
             offline: config.offline,
         }
         .run_without_mem_cache::<Reporter>()

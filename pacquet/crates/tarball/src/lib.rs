@@ -1,14 +1,19 @@
 use std::{
     collections::HashMap,
+    fs,
     io::{Cursor, Read},
-    path::{Component, PathBuf},
-    sync::{Arc, OnceLock},
-    time::{Duration, Instant, UNIX_EPOCH},
+    path::{Component, Path, PathBuf},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use dashmap::DashMap;
 use derive_more::{Display, Error, From};
 use miette::Diagnostic;
+use pacquet_crypto_hash::create_short_hash;
 use pacquet_fs::file_mode;
 use pacquet_network::{AuthHeaders, ThrottledClient};
 use pacquet_reporter::{
@@ -27,6 +32,9 @@ use tar::Archive;
 use tokio::sync::{Notify, RwLock, Semaphore};
 use tracing::instrument;
 use zune_inflate::{DeflateDecoder, DeflateOptions, errors::InflateDecodeErrors};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 /// Cap on concurrent post-download tarball work (SHA-512 of the whole
 /// tarball + gzip inflate + per-file SHA-512 + CAFS writes). The body is
@@ -199,6 +207,11 @@ pub enum TarballError {
     #[display("Failed to write cafs: {_0}")]
     #[diagnostic(transparent)]
     WriteCasFile(WriteCasFileError),
+
+    #[from(ignore)]
+    #[display("Failed to write package tree cache: {_0}")]
+    #[diagnostic(code(pacquet_tarball::write_package_tree))]
+    WritePackageTree(std::io::Error),
 
     #[from(ignore)]
     #[display("Failed to write store index (SQLite index): {_0}")]
@@ -514,6 +527,7 @@ fn extract_tarball_entries(
     tar_data: &[u8],
     store_dir: &StoreDir,
     ignore_file_pattern: Option<&IgnoreEntryFilter>,
+    package_tree_dir: Option<&Path>,
 ) -> Result<(HashMap<String, PathBuf>, PackageFilesIndex), TarballError> {
     let mut archive = Archive::new(Cursor::new(tar_data));
     let entries = archive
@@ -539,161 +553,272 @@ fn extract_tarball_entries(
         files: HashMap::with_capacity(capacity),
         side_effects: None,
     };
+    let package_tree = package_tree_dir.map(PackageTreeStage::new).transpose()?;
 
-    for entry in entries {
-        let entry = entry.map_err(TarballError::ReadTarballEntries)?;
+    let extraction_result = (|| -> Result<(), TarballError> {
+        for entry in entries {
+            let entry = entry.map_err(TarballError::ReadTarballEntries)?;
 
-        let file_mode = entry.header().mode().map_err(TarballError::ReadTarballEntries)?;
-        let file_is_executable = file_mode::is_executable(file_mode);
-        let file_size = entry.header().size().map_err(TarballError::ReadTarballEntries)?;
-        let data_offset = usize::try_from(entry.raw_file_position()).map_err(|_| {
-            TarballError::ReadTarballEntries(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "tar entry file offset does not fit in usize",
-            ))
-        })?;
-        let size = usize::try_from(file_size).map_err(|_| {
-            TarballError::ReadTarballEntries(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "tar entry file size does not fit in usize",
-            ))
-        })?;
-        let end = data_offset.checked_add(size).ok_or_else(|| {
-            TarballError::ReadTarballEntries(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "tar entry file offset plus size overflows usize",
-            ))
-        })?;
-        let entry_data = tar_data.get(data_offset..end).ok_or_else(|| {
-            TarballError::ReadTarballEntries(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "tar entry payload extends beyond archive",
-            ))
-        })?;
+            let file_mode = entry.header().mode().map_err(TarballError::ReadTarballEntries)?;
+            let file_is_executable = file_mode::is_executable(file_mode);
+            let file_size = entry.header().size().map_err(TarballError::ReadTarballEntries)?;
+            let data_offset = usize::try_from(entry.raw_file_position()).map_err(|_| {
+                TarballError::ReadTarballEntries(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "tar entry file offset does not fit in usize",
+                ))
+            })?;
+            let size = usize::try_from(file_size).map_err(|_| {
+                TarballError::ReadTarballEntries(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "tar entry file size does not fit in usize",
+                ))
+            })?;
+            let end = data_offset.checked_add(size).ok_or_else(|| {
+                TarballError::ReadTarballEntries(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "tar entry file offset plus size overflows usize",
+                ))
+            })?;
+            let entry_data = tar_data.get(data_offset..end).ok_or_else(|| {
+                TarballError::ReadTarballEntries(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "tar entry payload extends beyond archive",
+                ))
+            })?;
 
-        let entry_path = entry.path().map_err(TarballError::ReadTarballEntries)?;
-        // `components().skip(1)` drops the top-level package
-        // directory (`package/`). Every remaining component must be
-        // `Component::Normal`: a hostile tarball can carry `..`,
-        // absolute-root, or Windows-prefix components that — joined
-        // onto the CAFS extraction root later in `create_cas_files`
-        // — would land files outside the store (directory traversal).
-        // Reject loudly rather than silently normalize so tampering
-        // is visible.
-        //
-        // Collect components into a `Vec<String>` and join with `/`
-        // rather than going through [`PathBuf::push`] + `to_string_lossy`.
-        // `PathBuf` uses the platform's native separator, so on
-        // Windows the joined form would be `bin\tool` — which
-        // diverges from pnpm's string-based path layer (always `/`)
-        // and breaks any [`ignore_file_pattern`] regex / hand-coded
-        // matcher that expects forward slashes. The shared `index.db`
-        // also has to stay byte-identical to what pnpm writes, so a
-        // pacquet install on Windows must emit the same keys.
-        // `to_string_lossy()` coerces non-UTF-8 bytes to U+FFFD
-        // per-component.
-        let mut parts: Vec<String> = Vec::new();
-        for component in entry_path.components().skip(1) {
-            let Component::Normal(part) = component else {
+            let entry_path = entry.path().map_err(TarballError::ReadTarballEntries)?;
+            // `components().skip(1)` drops the top-level package
+            // directory (`package/`). Every remaining component must be
+            // `Component::Normal`: a hostile tarball can carry `..`,
+            // absolute-root, or Windows-prefix components that — joined
+            // onto the CAFS extraction root later in `create_cas_files`
+            // — would land files outside the store (directory traversal).
+            // Reject loudly rather than silently normalize so tampering
+            // is visible.
+            //
+            // Collect components into a `Vec<String>` and join with `/`
+            // rather than going through [`PathBuf::push`] + `to_string_lossy`.
+            // `PathBuf` uses the platform's native separator, so on
+            // Windows the joined form would be `bin\tool` — which
+            // diverges from pnpm's string-based path layer (always `/`)
+            // and breaks any [`ignore_file_pattern`] regex / hand-coded
+            // matcher that expects forward slashes. The shared `index.db`
+            // also has to stay byte-identical to what pnpm writes, so a
+            // pacquet install on Windows must emit the same keys.
+            // `to_string_lossy()` coerces non-UTF-8 bytes to U+FFFD
+            // per-component.
+            let mut parts: Vec<String> = Vec::new();
+            for component in entry_path.components().skip(1) {
+                let Component::Normal(part) = component else {
+                    return Err(TarballError::ReadTarballEntries(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "tar entry path rejected (non-normal component, possible directory traversal): {entry_path:?}",
+                        ),
+                    )));
+                };
+                parts.push(part.to_string_lossy().into_owned());
+            }
+            if parts.is_empty() {
                 return Err(TarballError::ReadTarballEntries(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
-                        "tar entry path rejected (non-normal component, possible directory traversal): {entry_path:?}",
+                        "tar entry path has no payload after dropping the top-level component: {entry_path:?}",
                     ),
                 )));
-            };
-            parts.push(part.to_string_lossy().into_owned());
-        }
-        if parts.is_empty() {
-            return Err(TarballError::ReadTarballEntries(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "tar entry path has no payload after dropping the top-level component: {entry_path:?}",
-                ),
-            )));
-        }
-        let cleaned_entry_path = parts.join("/");
-        // Drop ignored entries before the CAS write. Mirrors
-        // upstream's `ignoreFilePattern` semantics: paths are matched
-        // *after* the top-level prefix strip, so the callback sees
-        // the same strings pnpm's regex does. Bypassing the CAS
-        // write here also keeps the package's
-        // [`PackageFilesIndex`] tight — an ignored entry never
-        // surfaces in `files` or `manifest`.
-        if let Some(filter) = ignore_file_pattern
-            && filter(&cleaned_entry_path)
-        {
-            continue;
-        }
-        let (file_path, file_hash) = store_dir
-            .write_cas_file(entry_data, file_is_executable)
-            .map_err(TarballError::WriteCasFile)?;
+            }
+            let cleaned_entry_path = parts.join("/");
+            // Drop ignored entries before the CAS write. Mirrors
+            // upstream's `ignoreFilePattern` semantics: paths are matched
+            // *after* the top-level prefix strip, so the callback sees
+            // the same strings pnpm's regex does. Bypassing the CAS
+            // write here also keeps the package's
+            // [`PackageFilesIndex`] tight — an ignored entry never
+            // surfaces in `files` or `manifest`.
+            if let Some(filter) = ignore_file_pattern
+                && filter(&cleaned_entry_path)
+            {
+                continue;
+            }
+            if let Some(package_tree) = &package_tree {
+                package_tree.write_file(&cleaned_entry_path, entry_data, file_is_executable)?;
+            }
+            let (file_path, file_hash) = store_dir
+                .write_cas_file(entry_data, file_is_executable)
+                .map_err(TarballError::WriteCasFile)?;
 
-        if let Some(previous) = cas_paths.insert(cleaned_entry_path.clone(), file_path) {
-            tracing::warn!(?previous, "Duplication detected. Old entry has been ejected");
-        }
+            if let Some(previous) = cas_paths.insert(cleaned_entry_path.clone(), file_path) {
+                tracing::warn!(?previous, "Duplication detected. Old entry has been ejected");
+            }
 
-        // Capture the parsed manifest whenever we see `package.json`.
-        // Mirrors pnpm's `bundledManifest` pass-through at
-        // [pnpm/pnpm@4750fd370c]: pnpm stuffs the narrowed manifest
-        // into `pkgFilesIndex.manifest` so install-side consumers
-        // (notably `linkBinsOfDependencies`) can avoid re-reading
-        // the file from disk. The [`normalize_bundled_manifest`]
-        // pick drops fields downstream code doesn't use, keeping
-        // `index.db` rows tight.
-        //
-        // **Last-entry wins.** Pnpm's [`addFilesFromTarball`] always
-        // overwrites `manifestBuffer = fileBuffer` per `package.json`
-        // entry (no `if (manifestBuffer === undefined)` guard), so
-        // when a tarball contains duplicate `package.json` entries
-        // the final one is canonical — same shape as
-        // `filesIndex.set(...)` which already overwrites duplicates.
-        // Real npm tarballs never publish multiple `package.json`
-        // entries, but the consistency with the `files` map is what
-        // matters: `manifest` and `files` must describe the same
-        // file. Failed JSON parses degrade the field to `None` (the
-        // manifest is best-effort; a corrupt `package.json` is the
-        // publisher's fault and downstream code can fall back to
-        // disk reads).
-        //
-        // [pnpm/pnpm@4750fd370c]: <https://github.com/pnpm/pnpm/blob/4750fd370c/worker/src/start.ts#L218>
-        // [`addFilesFromTarball`]: <https://github.com/pnpm/pnpm/blob/4750fd370c/store/cafs/src/addFilesFromTarball.ts#L41-L43>
-        if cleaned_entry_path == "package.json" {
-            match serde_json::from_slice::<serde_json::Value>(entry_data) {
-                Ok(parsed) => pkg_files_idx.manifest = normalize_bundled_manifest(&parsed),
-                Err(error) => {
-                    tracing::debug!(
-                        ?error,
-                        "package.json in tarball failed to parse as JSON; bundled manifest cleared",
-                    );
-                    pkg_files_idx.manifest = None;
+            // Capture the parsed manifest whenever we see `package.json`.
+            // Mirrors pnpm's `bundledManifest` pass-through at
+            // [pnpm/pnpm@4750fd370c]: pnpm stuffs the narrowed manifest
+            // into `pkgFilesIndex.manifest` so install-side consumers
+            // (notably `linkBinsOfDependencies`) can avoid re-reading
+            // the file from disk. The [`normalize_bundled_manifest`]
+            // pick drops fields downstream code doesn't use, keeping
+            // `index.db` rows tight.
+            //
+            // **Last-entry wins.** Pnpm's [`addFilesFromTarball`] always
+            // overwrites `manifestBuffer = fileBuffer` per `package.json`
+            // entry (no `if (manifestBuffer === undefined)` guard), so
+            // when a tarball contains duplicate `package.json` entries
+            // the final one is canonical — same shape as
+            // `filesIndex.set(...)` which already overwrites duplicates.
+            // Real npm tarballs never publish multiple `package.json`
+            // entries, but the consistency with the `files` map is what
+            // matters: `manifest` and `files` must describe the same
+            // file. Failed JSON parses degrade the field to `None` (the
+            // manifest is best-effort; a corrupt `package.json` is the
+            // publisher's fault and downstream code can fall back to
+            // disk reads).
+            //
+            // [pnpm/pnpm@4750fd370c]: <https://github.com/pnpm/pnpm/blob/4750fd370c/worker/src/start.ts#L218>
+            // [`addFilesFromTarball`]: <https://github.com/pnpm/pnpm/blob/4750fd370c/store/cafs/src/addFilesFromTarball.ts#L41-L43>
+            if cleaned_entry_path == "package.json" {
+                match serde_json::from_slice::<serde_json::Value>(entry_data) {
+                    Ok(parsed) => pkg_files_idx.manifest = normalize_bundled_manifest(&parsed),
+                    Err(error) => {
+                        tracing::debug!(
+                            ?error,
+                            "package.json in tarball failed to parse as JSON; bundled manifest cleared",
+                        );
+                        pkg_files_idx.manifest = None;
+                    }
                 }
+            }
+
+            // `as_millis()` returns `u128`; narrow to `u64` to match the
+            // store index schema — see `CafsFileInfo::checked_at` for why
+            // `u64` is used. Using `u64::try_from` rather than `as u64`
+            // avoids a silent wrap: even though millisecond epochs don't
+            // overflow `u64` for ~584M years, the intent should be
+            // explicit. If the clock ever reports something
+            // unrepresentable, drop the timestamp — the `checkedAt` field
+            // is optional and pnpm tolerates `None`.
+            let checked_at = UNIX_EPOCH
+                .elapsed()
+                .ok()
+                .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
+            let file_attrs = CafsFileInfo {
+                digest: format!("{file_hash:x}"),
+                mode: file_mode,
+                size: file_size,
+                checked_at,
+            };
+
+            if let Some(previous) = pkg_files_idx.files.insert(cleaned_entry_path, file_attrs) {
+                tracing::warn!(?previous, "Duplication detected. Old entry has been ejected");
             }
         }
 
-        // `as_millis()` returns `u128`; narrow to `u64` to match the
-        // store index schema — see `CafsFileInfo::checked_at` for why
-        // `u64` is used. Using `u64::try_from` rather than `as u64`
-        // avoids a silent wrap: even though millisecond epochs don't
-        // overflow `u64` for ~584M years, the intent should be
-        // explicit. If the clock ever reports something
-        // unrepresentable, drop the timestamp — the `checkedAt` field
-        // is optional and pnpm tolerates `None`.
-        let checked_at =
-            UNIX_EPOCH.elapsed().ok().and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
-        let file_attrs = CafsFileInfo {
-            digest: format!("{file_hash:x}"),
-            mode: file_mode,
-            size: file_size,
-            checked_at,
-        };
+        Ok(())
+    })();
 
-        if let Some(previous) = pkg_files_idx.files.insert(cleaned_entry_path, file_attrs) {
-            tracing::warn!(?previous, "Duplication detected. Old entry has been ejected");
-        }
+    if extraction_result.is_err()
+        && let Some(package_tree) = &package_tree
+    {
+        package_tree.cleanup();
+    }
+    extraction_result?;
+
+    if let Some(package_tree) = package_tree {
+        package_tree.finish(&cas_paths)?;
     }
 
     Ok((cas_paths, pkg_files_idx))
+}
+
+struct PackageTreeStage {
+    root: PathBuf,
+    stage: PathBuf,
+    files_dir: PathBuf,
+}
+
+impl PackageTreeStage {
+    fn new(root: &Path) -> Result<Self, TarballError> {
+        let parent = root.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(TarballError::WritePackageTree)?;
+        fs::create_dir_all(root).map_err(TarballError::WritePackageTree)?;
+        let stage = package_tree_stage_path(root);
+        let files_dir = stage.join("files");
+        fs::create_dir_all(&files_dir).map_err(TarballError::WritePackageTree)?;
+        Ok(Self { root: root.to_path_buf(), stage, files_dir })
+    }
+
+    fn write_file(
+        &self,
+        relative_path: &str,
+        data: &[u8],
+        executable: bool,
+    ) -> Result<(), TarballError> {
+        let target = self.files_dir.join(relative_path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(TarballError::WritePackageTree)?;
+        }
+        fs::write(&target, data).map_err(TarballError::WritePackageTree)?;
+        set_executable_mode(&target, executable).map_err(TarballError::WritePackageTree)
+    }
+
+    fn finish(self, cas_paths: &HashMap<String, PathBuf>) -> Result<(), TarballError> {
+        let fingerprint = package_tree_fingerprint(cas_paths);
+        fs::write(self.stage.join(".initialized"), &fingerprint)
+            .map_err(TarballError::WritePackageTree)?;
+        let target = self.root.join(fingerprint);
+        if target.is_dir() {
+            let _ = fs::remove_dir_all(&self.stage);
+            return Ok(());
+        }
+        match fs::rename(&self.stage, &target) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_dir_all(&self.stage);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::remove_dir_all(&self.stage);
+                Err(TarballError::WritePackageTree(error))
+            }
+        }
+    }
+
+    fn cleanup(&self) {
+        let _ = fs::remove_dir_all(&self.stage);
+    }
+}
+
+fn package_tree_fingerprint(cas_paths: &HashMap<String, PathBuf>) -> String {
+    let mut entries: Vec<_> =
+        cas_paths.iter().map(|(rel, path)| format!("{rel}\0{}", path.display())).collect();
+    entries.sort_unstable();
+    create_short_hash(&entries.join("\0"))
+}
+
+fn package_tree_stage_path(root: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = root.parent().unwrap_or_else(|| Path::new("."));
+    let name = root.file_name().and_then(|name| name.to_str()).unwrap_or("package-tree");
+    let pid = std::process::id();
+    let ctr = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    parent.join(format!("{name}_pacquet-stage_{pid}_{nanos}_{ctr}"))
+}
+
+#[cfg(unix)]
+fn set_executable_mode(path: &Path, executable: bool) -> std::io::Result<()> {
+    if executable {
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(file_mode::EXEC_MODE);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable_mode(_path: &Path, _executable: bool) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Walk a zip archive, writing each regular-file entry into the CAFS
@@ -1306,6 +1431,12 @@ pub struct DownloadTarballToStore<'a> {
     /// Arc per retry attempt is cheap; the inner trait object
     /// is shared.
     pub ignore_file_pattern: Option<Arc<IgnoreEntryFilter>>,
+    /// Optional pacquet-side package-tree cache root. When a tarball
+    /// has to be extracted, pacquet writes the same regular files into
+    /// this package-shaped tree while the tar payload bytes are hot,
+    /// then later materializes `node_modules` with a directory clone
+    /// on platforms that support it.
+    pub package_tree_dir: Option<PathBuf>,
     /// `offline` from `Config`. When `true` and both the warm
     /// prefetch (`prefetched_cas_paths`) and the SQLite `index.db`
     /// lookup (`load_cached_cas_paths`) miss, the fetcher fails fast
@@ -1356,7 +1487,9 @@ fn tarball_error_to_request_retry(err: &TarballError) -> RequestRetryError {
         TarballError::ReadTarballEntries(_) => {
             out.code = Some("ERR_PACQUET_TARBALL_TAR".to_string());
         }
-        TarballError::WriteCasFile(_) | TarballError::WriteStoreIndex(_) => {
+        TarballError::WriteCasFile(_)
+        | TarballError::WritePackageTree(_)
+        | TarballError::WriteStoreIndex(_) => {
             out.code = Some("ERR_PACQUET_TARBALL_STORE".to_string());
         }
         TarballError::TaskJoin(_) => {
@@ -1444,6 +1577,7 @@ async fn fetch_and_extract_once<Reporter: self::Reporter>(
     store_dir: &'static StoreDir,
     auth_headers: &AuthHeaders,
     ignore_file_pattern: Option<Arc<IgnoreEntryFilter>>,
+    package_tree_dir: Option<PathBuf>,
 ) -> Result<(Integrity, HashMap<String, PathBuf>, PackageFilesIndex), TarballError> {
     let network_error =
         |error| TarballError::FetchTarball(NetworkError { url: package_url.to_string(), error });
@@ -1663,7 +1797,12 @@ async fn fetch_and_extract_once<Reporter: self::Reporter>(
             // bytes can be many MB.
             let (cas_paths, pkg_files_idx) = {
                 let tar_data = decompress_gzip(&buffer, package_unpacked_size)?;
-                extract_tarball_entries(&tar_data, store_dir, ignore_file_pattern.as_deref())?
+                extract_tarball_entries(
+                    &tar_data,
+                    store_dir,
+                    ignore_file_pattern.as_deref(),
+                    package_tree_dir.as_deref(),
+                )?
             };
             Ok((integrity, cas_paths, pkg_files_idx))
         },
@@ -1720,6 +1859,7 @@ async fn fetch_and_extract_with_retry<Reporter: self::Reporter>(
     retry_opts: RetryOpts,
     auth_headers: &AuthHeaders,
     ignore_file_pattern: Option<Arc<IgnoreEntryFilter>>,
+    package_tree_dir: Option<PathBuf>,
 ) -> Result<(Integrity, HashMap<String, PathBuf>, PackageFilesIndex), TarballError> {
     let mut attempt: u32 = 0;
     loop {
@@ -1733,6 +1873,7 @@ async fn fetch_and_extract_with_retry<Reporter: self::Reporter>(
             store_dir,
             auth_headers,
             ignore_file_pattern.clone(),
+            package_tree_dir.clone(),
         )
         .await;
         match result {
@@ -2005,6 +2146,7 @@ impl<'a> DownloadTarballToStore<'a> {
         let store_index = self.store_index.clone();
         let store_index_writer = self.store_index_writer.clone();
         let verified_files_cache = Arc::clone(&self.verified_files_cache);
+        let package_tree_dir = self.package_tree_dir.clone().filter(|_| cfg!(target_os = "macos"));
         // `Option<Arc<IgnoreEntryFilter>>` isn't `Copy`, so it can't
         // ride along in the deref-destructure above. `.clone()`
         // here bumps the Arc refcount — cheap, and the trait
@@ -2111,6 +2253,7 @@ impl<'a> DownloadTarballToStore<'a> {
                 retry_opts,
                 auth_headers,
                 ignore_file_pattern,
+                package_tree_dir,
             )
             .await?;
 
@@ -2199,6 +2342,7 @@ impl FetchTarballForResolution<'_> {
             store_dir,
             retry_opts,
             auth_headers,
+            None,
             None,
         )
         .await?;

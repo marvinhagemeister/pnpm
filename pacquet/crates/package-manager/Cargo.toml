@@ -58,6 +58,7 @@ derive_more     = { workspace = true }
 futures-util    = { workspace = true }
 httpdate        = { workspace = true }
 indexmap        = { workspace = true }
+libc            = { workspace = true }
 node-semver     = { workspace = true }
 pathdiff        = { workspace = true }
 pipe-trait      = { workspace = true }

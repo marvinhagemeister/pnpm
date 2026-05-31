@@ -13,7 +13,7 @@ use pacquet_store_dir::{
 use pipe_trait::Pipe;
 use pretty_assertions::assert_eq;
 use ssri::Integrity;
-use std::{collections::HashMap, io::Cursor, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, fs, io::Cursor, path::PathBuf, sync::Arc, time::Duration};
 use tempfile::{TempDir, tempdir};
 
 fn integrity(integrity_str: &str) -> Integrity {
@@ -177,6 +177,7 @@ async fn packages_under_orgs_should_work() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_without_mem_cache::<SilentReporter>()
@@ -227,6 +228,7 @@ async fn should_throw_error_on_checksum_mismatch() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_without_mem_cache::<SilentReporter>()
@@ -304,6 +306,7 @@ async fn reuses_cached_cas_paths_when_index_entry_is_live() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_without_mem_cache::<SilentReporter>()
@@ -365,6 +368,7 @@ async fn reuses_prefetched_cas_paths_when_provided() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_without_mem_cache::<SilentReporter>()
@@ -594,6 +598,7 @@ async fn falls_through_when_cafs_file_missing() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_without_mem_cache::<SilentReporter>()
@@ -655,6 +660,7 @@ async fn falls_through_when_digest_is_malformed() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_without_mem_cache::<SilentReporter>()
@@ -719,6 +725,7 @@ async fn falls_through_when_cafs_path_is_a_directory() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_without_mem_cache::<SilentReporter>()
@@ -793,6 +800,7 @@ async fn falls_through_when_cafs_path_is_a_symlink() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_without_mem_cache::<SilentReporter>()
@@ -830,7 +838,7 @@ fn extract_propagates_malformed_tar_instead_of_panicking() {
     // way the filter+map_err plumbing must surface the failure as
     // `TarballError::ReadTarballEntries`.
     let bogus: Vec<u8> = vec![0xFF; 1024];
-    let err = extract_tarball_entries(&bogus, store_path, None)
+    let err = extract_tarball_entries(&bogus, store_path, None, None)
         .expect_err("malformed tar must surface a TarballError, not panic");
 
     assert!(
@@ -880,7 +888,7 @@ fn extract_rejects_parent_dir_component_in_entry_path() {
         builder.finish().expect("finalize tar");
     }
 
-    let err = extract_tarball_entries(&tar_bytes, store_path, None)
+    let err = extract_tarball_entries(&tar_bytes, store_path, None, None)
         .expect_err("parent-dir component must be rejected, not normalized");
 
     match err {
@@ -928,10 +936,9 @@ fn extract_tarball_applies_ignore_filter_dropping_entries_from_both_maps() {
     }
 
     let (cas_paths, pkg_files_idx) =
-        extract_tarball_entries(&tar_bytes, store_path, Some(&drop_npm))
+        extract_tarball_entries(&tar_bytes, store_path, Some(&drop_npm), None)
             .expect("tarball extraction with ignore filter");
 
-    dbg!(&cas_paths);
     assert!(cas_paths.contains_key("bin/tool"));
     assert!(cas_paths.contains_key("README.md"));
     assert!(
@@ -939,13 +946,59 @@ fn extract_tarball_applies_ignore_filter_dropping_entries_from_both_maps() {
         "ignore filter should drop bundled npm from cas_paths",
     );
 
-    dbg!(&pkg_files_idx.files);
     assert!(pkg_files_idx.files.contains_key("bin/tool"));
     assert!(pkg_files_idx.files.contains_key("README.md"));
     assert!(
         !pkg_files_idx.files.contains_key("lib/node_modules/npm/package.json"),
         "ignore filter should drop bundled npm from pkg_files_idx.files",
     );
+
+    drop(tempdir);
+}
+
+#[test]
+fn extract_tarball_writes_package_tree_cache_when_requested() {
+    let (tempdir, store_path) = tempdir_with_leaked_path();
+    let package_tree_root = tempdir.path().join("package-tree");
+
+    let mut tar_bytes = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_bytes);
+        for (path, body, mode) in [
+            ("package/package.json", &b"{\"name\":\"pkg\"}"[..], 0o644),
+            ("package/bin/cli.js", &b"#!/usr/bin/env node\n"[..], 0o755),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(mode);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append_data(&mut header, path, body).expect("append entry");
+        }
+        builder.finish().expect("finalize tar");
+    }
+
+    let (cas_paths, pkg_files_idx) =
+        extract_tarball_entries(&tar_bytes, store_path, None, Some(&package_tree_root))
+            .expect("tarball extraction with package tree cache");
+
+    assert!(cas_paths.contains_key("package.json"));
+    assert!(pkg_files_idx.files.contains_key("bin/cli.js"));
+
+    let entries: Vec<_> =
+        fs::read_dir(&package_tree_root).unwrap().map(|entry| entry.unwrap().path()).collect();
+    assert_eq!(entries.len(), 1, "one fingerprinted package-tree entry should be written");
+    let tree = &entries[0];
+    assert!(tree.join(".initialized").is_file());
+    assert_eq!(fs::read(tree.join("files/package.json")).unwrap(), b"{\"name\":\"pkg\"}");
+    assert_eq!(fs::read(tree.join("files/bin/cli.js")).unwrap(), b"#!/usr/bin/env node\n");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(tree.join("files/bin/cli.js")).unwrap().permissions().mode();
+        assert_ne!(mode & 0o111, 0, "executable bit should be preserved in package tree");
+    }
 
     drop(tempdir);
 }
@@ -1069,6 +1122,7 @@ async fn retries_then_succeeds_on_transient_5xx() {
         fast_retry_opts(),
         &AuthHeaders::default(),
         None,
+        None,
     )
     .await
     .expect("transient 503 should be followed by a successful retry");
@@ -1117,6 +1171,7 @@ async fn retries_integrity_mismatch_until_exhausted() {
         fast_retry_opts(),
         &AuthHeaders::default(),
         None,
+        None,
     )
     .await
     .expect_err("integrity mismatch should exhaust the retry budget");
@@ -1148,6 +1203,7 @@ async fn fails_fast_on_404() {
         store_path,
         fast_retry_opts(),
         &AuthHeaders::default(),
+        None,
         None,
     )
     .await
@@ -1190,6 +1246,7 @@ async fn retries_other_4xx_codes() {
         fast_retry_opts(),
         &AuthHeaders::default(),
         None,
+        None,
     )
     .await
     .expect_err("non-401/403/404 4xx should exhaust the retry budget");
@@ -1224,6 +1281,7 @@ async fn retry_exhaustion_returns_last_error() {
         store_path,
         fast_retry_opts(),
         &AuthHeaders::default(),
+        None,
         None,
     )
     .await
@@ -1349,6 +1407,7 @@ fn run_with_mem_cache_does_not_deadlock_on_dashmap_shard_contention() {
                     retry_opts: RetryOpts { retries: 0, ..RetryOpts::default() },
                     auth_headers,
                     ignore_file_pattern: None,
+                    package_tree_dir: None,
                     offline: false,
                 };
 
@@ -1419,6 +1478,7 @@ async fn zero_retries_makes_a_single_attempt() {
         opts,
         &AuthHeaders::default(),
         None,
+        None,
     )
     .await
     .expect_err("retries=0 must surface the first failure");
@@ -1463,6 +1523,7 @@ async fn fetch_attaches_authorization_header_when_creds_match_tarball_url() {
         store_path,
         fast_retry_opts(),
         &auth_headers,
+        None,
         None,
     )
     .await
@@ -1517,6 +1578,7 @@ async fn retry_re_attaches_authorization_header_on_each_attempt() {
         store_path,
         fast_retry_opts(),
         &auth_headers,
+        None,
         None,
     )
     .await
@@ -1602,6 +1664,7 @@ async fn mem_cache_hit_emits_found_in_store_against_callers_reporter() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_with_mem_cache::<pacquet_reporter::SilentReporter>(&mem_cache)
@@ -1629,6 +1692,7 @@ async fn mem_cache_hit_emits_found_in_store_against_callers_reporter() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_with_mem_cache::<RecordingReporter>(&mem_cache)
@@ -1729,6 +1793,7 @@ async fn run_with_mem_cache_recovers_from_owning_fetch_error() {
         retry_opts: test_retry_opts(),
         auth_headers,
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     };
 
@@ -1831,6 +1896,7 @@ async fn fetching_progress_and_fetched_events_fire_during_download() {
         fast_retry_opts(),
         &AuthHeaders::default(),
         None,
+        None,
     )
     .await
     .expect("transient 503 should be followed by a successful retry");
@@ -1920,6 +1986,7 @@ async fn started_fires_for_connection_level_failures() {
         store_path,
         RetryOpts { retries: 0, ..fast_retry_opts() },
         &AuthHeaders::default(),
+        None,
         None,
     )
     .await
@@ -2011,6 +2078,7 @@ async fn found_in_store_event_fires_on_cache_hit() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_without_mem_cache::<SilentReporter>()
@@ -2049,6 +2117,7 @@ async fn found_in_store_event_fires_on_cache_hit() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: false,
     }
     .run_without_mem_cache::<RecordingReporter>()
@@ -2127,6 +2196,7 @@ async fn request_retry_event_fires_per_retried_attempt() {
         store_path,
         fast_retry_opts(),
         &AuthHeaders::default(),
+        None,
         None,
     )
     .await
@@ -2440,6 +2510,7 @@ async fn offline_mode_skips_network_on_cache_miss() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: true,
     }
     .run_without_mem_cache::<SilentReporter>()
@@ -2510,6 +2581,7 @@ async fn offline_mode_still_uses_prefetched_cache() {
         retry_opts: test_retry_opts(),
         auth_headers: &AuthHeaders::default(),
         ignore_file_pattern: None,
+        package_tree_dir: None,
         offline: true,
     }
     .run_without_mem_cache::<SilentReporter>()
