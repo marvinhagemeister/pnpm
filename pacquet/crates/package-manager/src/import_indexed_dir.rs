@@ -273,18 +273,29 @@ fn try_populate_from_package_tree<Reporter: self::Reporter>(
         return false;
     }
 
+    let trace_package_tree =
+        tracing::enabled!(target: "pacquet::package_tree", tracing::Level::DEBUG);
+    let total_start = trace_package_tree.then(std::time::Instant::now);
+    let fingerprint_start = trace_package_tree.then(std::time::Instant::now);
     let fingerprint = package_tree_fingerprint(cas_paths);
+    let fingerprint_ms = fingerprint_start.map(elapsed_ms);
     let package_tree_dir = package_tree_dir.join(&fingerprint);
-    if !matches!(
+    let sentinel_start = trace_package_tree.then(std::time::Instant::now);
+    let initialized = matches!(
         fs::read_to_string(package_tree_dir.join(".initialized")),
         Ok(existing) if existing == fingerprint
-    ) && let Err(error) = build_package_tree::<Reporter>(
-        logged_methods,
-        import_method,
-        cas_paths,
-        &package_tree_dir,
-        &fingerprint,
-    ) {
+    );
+    let sentinel_ms = sentinel_start.map(elapsed_ms);
+    let build_start = trace_package_tree.then(std::time::Instant::now);
+    if !initialized
+        && let Err(error) = build_package_tree::<Reporter>(
+            logged_methods,
+            import_method,
+            cas_paths,
+            &package_tree_dir,
+            &fingerprint,
+        )
+    {
         tracing::debug!(
             target: "pacquet::import_indexed_dir",
             ?package_tree_dir,
@@ -293,11 +304,29 @@ fn try_populate_from_package_tree<Reporter: self::Reporter>(
         );
         return false;
     }
+    let build_ms = build_start.map(elapsed_ms);
 
     let files_dir = package_tree_dir.join("files");
+    let clone_start = trace_package_tree.then(std::time::Instant::now);
     match clone_package_tree(&files_dir, dir_path) {
         Ok(()) => {
+            let clone_ms = clone_start.map(elapsed_ms);
             log_package_import_method_once::<Reporter>(logged_methods, WireImportMethod::Clone);
+            if let Some(total_start) = total_start {
+                tracing::debug!(
+                    target: "pacquet::package_tree",
+                    ?files_dir,
+                    ?dir_path,
+                    file_count = cas_paths.len(),
+                    initialized,
+                    fingerprint_ms = fingerprint_ms.unwrap_or_default(),
+                    sentinel_ms = sentinel_ms.unwrap_or_default(),
+                    build_ms = build_ms.unwrap_or_default(),
+                    clone_ms = clone_ms.unwrap_or_default(),
+                    total_ms = elapsed_ms(total_start),
+                    "populated package from package-tree cache",
+                );
+            }
             true
         }
         Err(error) => {
@@ -311,6 +340,10 @@ fn try_populate_from_package_tree<Reporter: self::Reporter>(
             false
         }
     }
+}
+
+fn elapsed_ms(start: std::time::Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
 }
 
 fn package_tree_supported(import_method: PackageImportMethod) -> bool {
