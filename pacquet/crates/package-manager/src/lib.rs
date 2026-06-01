@@ -18,7 +18,6 @@ mod install;
 pub(crate) mod install_frozen_lockfile;
 mod install_package_by_snapshot;
 mod install_package_from_registry;
-mod install_scheduler;
 mod install_with_fresh_lockfile;
 mod installability;
 mod link_bins;

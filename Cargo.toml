@@ -63,6 +63,7 @@ pacquet-resolving-npm-resolver            = { path = "pacquet/crates/resolving-n
 pacquet-resolving-parse-wanted-dependency = { path = "pacquet/crates/resolving-parse-wanted-dependency" }
 pacquet-resolving-resolver-base           = { path = "pacquet/crates/resolving-resolver-base" }
 pacquet-resolving-tarball-resolver        = { path = "pacquet/crates/resolving-tarball-resolver" }
+pacquet-scheduler                         = { path = "pacquet/crates/scheduler" }
 pacquet-workspace                         = { path = "pacquet/crates/workspace" }
 pacquet-workspace-projects-filter         = { path = "pacquet/crates/workspace-projects-filter" }
 pacquet-workspace-projects-graph          = { path = "pacquet/crates/workspace-projects-graph" }

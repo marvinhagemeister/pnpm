@@ -646,7 +646,7 @@ impl<'a> CreateVirtualStore<'a> {
             // `nodeLinker === 'hoisted'` guard at
             // <https://github.com/pnpm/pnpm/blob/94240bc046/installing/deps-restorer/src/index.ts#L411-L425>
             // which routes all link work into `linkHoistedModules`.
-            let scheduler = crate::install_scheduler::InstallScheduler::current();
+            let scheduler = pacquet_scheduler::InstallScheduler::current();
             scheduler.run_fs_batch(&warm, |(snapshot_key, snapshot, cas_paths)| {
                 let package_id = snapshot_key.without_peer().to_string();
                 emit_warm_snapshot_progress::<Reporter>(&package_id, requester);

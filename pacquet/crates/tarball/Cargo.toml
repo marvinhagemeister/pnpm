@@ -16,13 +16,13 @@ pacquet-crypto-hash = { workspace = true }
 pacquet-fs          = { workspace = true }
 pacquet-network     = { workspace = true }
 pacquet-reporter    = { workspace = true }
+pacquet-scheduler   = { workspace = true }
 pacquet-store-dir   = { workspace = true }
 
 dashmap       = { workspace = true }
 derive_more   = { workspace = true }
 futures-util  = { workspace = true }
 miette        = { workspace = true }
-num_cpus      = { workspace = true }
 pipe-trait    = { workspace = true }
 rayon         = { workspace = true }
 reqwest       = { workspace = true }

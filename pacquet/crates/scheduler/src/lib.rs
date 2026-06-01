@@ -1,27 +1,28 @@
 use std::{
     cmp,
     sync::{
-        Mutex,
+        Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
 };
+use tokio::sync::Semaphore;
 
 /// Central boundary for install scheduling decisions.
 ///
 /// Filesystem batches use an explicit, OS-aware worker count instead of rayon.
 /// The long term goal is to split all install work by resource class (`cpu`,
-/// `fs`, `network`, `scripts`) so package-manager code describes the work it
-/// needs done instead of choosing the executor directly.
+/// `fs`, `network`, `scripts`) so call sites describe the work they need done
+/// instead of choosing the executor directly.
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct InstallScheduler;
+pub struct InstallScheduler;
 
 impl InstallScheduler {
-    pub(crate) fn current() -> Self {
+    pub fn current() -> Self {
         Self
     }
 
-    pub(crate) fn run_fs_batch<T, E, F>(&self, items: &[T], work: F) -> Result<(), E>
+    pub fn run_fs_batch<T, E, F>(&self, items: &[T], work: F) -> Result<(), E>
     where
         T: Sync,
         F: Fn(&T) -> Result<(), E> + Send + Sync,
@@ -30,7 +31,7 @@ impl InstallScheduler {
         self.run_blocking(|| run_bounded_fs_batch(items, work))
     }
 
-    pub(crate) fn run_fs_batch_unchecked<T, F>(&self, items: &[T], work: F)
+    pub fn run_fs_batch_unchecked<T, F>(&self, items: &[T], work: F)
     where
         T: Sync,
         F: Fn(&T) + Send + Sync,
@@ -38,12 +39,30 @@ impl InstallScheduler {
         self.run_blocking(|| run_bounded_fs_batch_unchecked(items, work))
     }
 
-    /// Run blocking package-manager work from either production's multi-thread
-    /// tokio runtime or tests' current-thread runtimes.
+    pub async fn run_cpu<F, R>(&self, work: F) -> Result<R, tokio::task::JoinError>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let _permit = cpu_semaphore().acquire().await.expect("cpu semaphore should stay open");
+        tokio::task::spawn_blocking(work).await
+    }
+
+    pub async fn run_fs<F, R>(&self, work: F) -> Result<R, tokio::task::JoinError>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let _permit = fs_semaphore().acquire().await.expect("fs semaphore should stay open");
+        tokio::task::spawn_blocking(work).await
+    }
+
+    /// Run blocking work from either production's multi-thread tokio runtime or
+    /// tests' current-thread runtimes.
     ///
     /// `tokio::task::block_in_place` is the right production boundary for a
-    /// synchronous package batch inside an async install: it lets tokio move
-    /// other futures off the worker before this thread blocks. It panics on
+    /// synchronous batch inside an async install: it lets tokio move other
+    /// futures off the worker before this thread blocks. It panics on
     /// current-thread runtimes, though, so tests and any single-thread caller
     /// run the closure inline.
     fn run_blocking<F, R>(&self, work: F) -> R
@@ -137,4 +156,18 @@ fn fs_parallelism() -> usize {
             .saturating_mul(2)
             .max(4)
     }
+}
+
+fn cpu_parallelism() -> usize {
+    std::thread::available_parallelism().map(std::num::NonZeroUsize::get).unwrap_or(1).max(1)
+}
+
+fn cpu_semaphore() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(cpu_parallelism()))
+}
+
+fn fs_semaphore() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(fs_parallelism()))
 }

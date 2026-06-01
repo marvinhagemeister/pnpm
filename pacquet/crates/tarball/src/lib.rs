@@ -4,7 +4,7 @@ use std::{
     io::{Cursor, Read},
     path::{Component, Path, PathBuf},
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -29,30 +29,12 @@ use rayon::prelude::*;
 use smart_default::SmartDefault;
 use ssri::{Algorithm, Integrity, IntegrityOpts};
 use tar::Archive;
-use tokio::sync::{Notify, RwLock, Semaphore};
+use tokio::sync::{Notify, RwLock};
 use tracing::instrument;
 use zune_inflate::{DeflateDecoder, DeflateOptions, errors::InflateDecodeErrors};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-
-/// Cap on concurrent post-download tarball work (SHA-512 of the whole
-/// tarball + gzip inflate + per-file SHA-512 + CAFS writes). The body is
-/// CPU-bound with some blocking FS I/O, and putting it on
-/// `tokio::task::spawn_blocking` makes the default 512-thread blocking
-/// pool available — but async fan-out across `try_join_all` routinely
-/// fires hundreds of these at once on a 1352-snapshot install, which
-/// thrashes small CI runners. Past "Download completed" a 2-CPU GitHub
-/// Actions runner wedged between decompress-close and `Checksum verified`
-/// on [#269] until the step timeout. `num_cpus * 2` (floor 4) keeps enough
-/// work in flight to overlap per-file FS writes with SHA on another task
-/// without oversubscribing the cores.
-///
-/// [#269]: https://github.com/pnpm/pacquet/pull/269
-fn post_download_semaphore() -> &'static Semaphore {
-    static SEM: OnceLock<Semaphore> = OnceLock::new();
-    SEM.get_or_init(|| Semaphore::new(num_cpus::get().saturating_mul(2).max(4)))
-}
 
 /// Reqwest's own [`std::fmt::Display`] for a request-stage failure renders as
 /// `error sending request for url (URL): <inner>` only if it can find
@@ -400,6 +382,26 @@ fn decompress_gzip(gz_data: &[u8], unpacked_size: Option<usize>) -> Result<Vec<u
     DeflateDecoder::new_with_options(gz_data, options)
         .decode_gzip()
         .map_err(TarballError::DecodeGzip)
+}
+
+fn verify_or_compute_integrity(
+    buffer: &[u8],
+    expected_integrity: Option<Integrity>,
+    package_url: String,
+) -> Result<Integrity, TarballError> {
+    match expected_integrity {
+        Some(expected) => {
+            expected.check(buffer).map_err(|error| {
+                TarballError::Checksum(VerifyChecksumError { url: package_url, error })
+            })?;
+            Ok(expected)
+        }
+        None => {
+            let mut opts = IntegrityOpts::new().algorithm(Algorithm::Sha512);
+            opts.input(buffer);
+            Ok(opts.result())
+        }
+    }
 }
 
 /// Mirror of pnpm's `normalizeBundledManifest` at
@@ -1558,9 +1560,9 @@ fn is_transient_error(err: &TarballError) -> bool {
 /// Permits are acquired *inside* this function so a backoff sleep
 /// between attempts doesn't keep one parked. The network permit is
 /// held from `connect + send` through body streaming (matching pnpm's
-/// pQueue and [#281]'s EMFILE fix), then dropped before the
-/// `post_download_semaphore` permit gates the CPU-bound checksum +
-/// decode + extract step.
+/// pQueue and [#281]'s EMFILE fix), then dropped before the shared
+/// scheduler gates CPU-bound checksum/decode work separately from
+/// filesystem-heavy extraction.
 ///
 /// [#281]: https://github.com/pnpm/pacquet/pull/281
 #[expect(
@@ -1731,7 +1733,7 @@ async fn fetch_and_extract_once<Reporter: self::Reporter>(
     };
 
     // Body fully buffered; release the network permit before the
-    // CPU-bound work so spawn_blocking doesn't hold one of the
+    // CPU-bound work so the scheduler's blocking worker doesn't hold one of the
     // limited fetch slots.
     //
     // The network permit was the only gate during fetch + body
@@ -1742,73 +1744,40 @@ async fn fetch_and_extract_once<Reporter: self::Reporter>(
     // tarballs accumulate beyond the network bound. In practice
     // flate2 decompresses faster than the network delivers, so
     // buffered-but-not-yet-decompressing tarballs stay close to zero.
-    // Gating body buffering with `post_download_semaphore` (the
-    // smaller `num_cpus * 2` cap) instead would pin `network_concurrency`
-    // permits waiting for it and collapse fetch concurrency down to
-    // `post_download` — that's the regression `perf(tarball)` (a43ca32)
-    // fixed; don't reintroduce it.
+    // Gating body buffering with the smaller CPU/FS scheduler caps instead
+    // would pin `network_concurrency` permits waiting for post-download work
+    // and collapse fetch concurrency down to those resource lanes — that's the
+    // regression `perf(tarball)` (a43ca32) fixed; don't reintroduce it.
     drop(client);
-
-    // Gate the CPU-heavy decompress + cafs-write pipeline. The blocking
-    // pool is 512-wide by default, which is right for I/O wait but
-    // disastrous for CPU work that can only really run `num_cpus` at a
-    // time, so we cap concurrent `spawn_blocking` bodies. The permit is
-    // held across the `spawn_blocking.await` below and dropped at end
-    // of scope.
-    let _post_download_permit = post_download_semaphore()
-        .acquire()
-        .await
-        .expect("post-download semaphore shouldn't be closed this soon");
 
     tracing::info!(target: "pacquet::download", ?package_url, "Download completed");
 
-    // Move the CPU-bound work (SHA-512, gzip inflate, per-file SHA-512,
-    // CAFS writes) onto the blocking pool. Same reasoning as before the
-    // retry refactor: a plain `tokio::spawn` pinned a reactor worker for
-    // each tarball — on a 2-core runner only two tarballs could make
-    // progress at a time. The post-download semaphore caps concurrency
-    // here.
+    let scheduler = pacquet_scheduler::InstallScheduler::current();
+
     let expected_integrity = expected_integrity.cloned();
     let package_url_owned = package_url.to_string();
-    let result = tokio::task::spawn_blocking(
-        move || -> Result<(Integrity, HashMap<String, PathBuf>, PackageFilesIndex), TarballError> {
-            // Verify a known integrity, or compute one when the hash
-            // isn't known until after download — remote (non-registry)
-            // https-tarball direct deps, where the resolver learns the
-            // integrity here. Mirrors pnpm's worker
-            // `integrity ?? calcIntegrity(buffer)`
-            // ([worker/src/start.ts](https://github.com/pnpm/pnpm/blob/086c5e91e8/worker/src/start.ts#L232)).
-            let integrity = match expected_integrity {
-                Some(expected) => {
-                    expected.check(&buffer).map_err(|error| {
-                        TarballError::Checksum(VerifyChecksumError { url: package_url_owned, error })
-                    })?;
-                    expected
-                }
-                None => {
-                    let mut opts = IntegrityOpts::new().algorithm(Algorithm::Sha512);
-                    opts.input(&buffer);
-                    opts.result()
-                }
-            };
+    let (integrity, tar_data) = scheduler
+        .run_cpu(move || -> Result<(Integrity, Vec<u8>), TarballError> {
+            let integrity =
+                verify_or_compute_integrity(&buffer, expected_integrity, package_url_owned)?;
+            let tar_data = decompress_gzip(&buffer, package_unpacked_size)?;
+            Ok((integrity, tar_data))
+        })
+        .await
+        .map_err(TarballError::TaskJoin)??;
 
-            // Extract in a scope so the decompressed buffer + `tar::Archive`
-            // are released before we return — a large package's inflated
-            // bytes can be many MB.
-            let (cas_paths, pkg_files_idx) = {
-                let tar_data = decompress_gzip(&buffer, package_unpacked_size)?;
-                extract_tarball_entries(
-                    &tar_data,
-                    store_dir,
-                    ignore_file_pattern.as_deref(),
-                    package_tree_dir.as_deref(),
-                )?
-            };
+    let result = scheduler
+        .run_fs(move || -> Result<(Integrity, HashMap<String, PathBuf>, PackageFilesIndex), TarballError> {
+            let (cas_paths, pkg_files_idx) = extract_tarball_entries(
+                &tar_data,
+                store_dir,
+                ignore_file_pattern.as_deref(),
+                package_tree_dir.as_deref(),
+            )?;
             Ok((integrity, cas_paths, pkg_files_idx))
-        },
-    )
-    .await
-    .map_err(TarballError::TaskJoin)??;
+        })
+        .await
+        .map_err(TarballError::TaskJoin)??;
 
     tracing::info!(target: "pacquet::download", ?package_url, "Checksum verified");
 
@@ -2388,9 +2357,9 @@ fn manifest_package_id(manifest: Option<&serde_json::Value>) -> Option<String> {
 /// body into RAM, verify the integrity hash, then walk the zip and
 /// extract every file entry into the CAFS. Mirrors
 /// [`fetch_and_extract_once`] one-for-one (same network permit
-/// shape, same post-download semaphore gate, same retry-friendly
-/// errors) — only the spawn_blocking body differs: integrity check
-/// then [`extract_zip_entries`] instead of the gzip + tar path.
+/// shape, same scheduler-gated CPU/FS resource lanes, same retry-friendly
+/// errors) — only the extraction body differs: integrity check then
+/// [`extract_zip_entries`] instead of the gzip + tar path.
 ///
 /// Mirrors upstream's `downloadAndUnpackZip` at
 /// <https://github.com/pnpm/pnpm/blob/94240bc046/fetching/binary-fetcher/src/index.ts>,
@@ -2504,25 +2473,25 @@ async fn fetch_and_extract_zip_once<Reporter: self::Reporter>(
     };
     drop(client);
 
-    let _post_download_permit = post_download_semaphore()
-        .acquire()
-        .await
-        .expect("post-download semaphore shouldn't be closed this soon");
-
     tracing::info!(target: "pacquet::download", ?package_url, "Download completed");
 
     let package_integrity = package_integrity.clone();
     let package_url_owned = package_url.to_string();
-    let archive_prefix_owned: Option<String> = archive_prefix.map(str::to_string);
-    let result = tokio::task::spawn_blocking(
-        move || -> Result<(HashMap<String, PathBuf>, PackageFilesIndex), TarballError> {
+    let scheduler = pacquet_scheduler::InstallScheduler::current();
+    let buffer = scheduler
+        .run_cpu(move || -> Result<Vec<u8>, TarballError> {
             package_integrity.check(&buffer).map_err(|error| {
-                TarballError::Checksum(VerifyChecksumError {
-                    url: package_url_owned.clone(),
-                    error,
-                })
+                TarballError::Checksum(VerifyChecksumError { url: package_url_owned, error })
             })?;
+            Ok(buffer)
+        })
+        .await
+        .map_err(TarballError::TaskJoin)??;
 
+    let package_url_owned = package_url.to_string();
+    let archive_prefix_owned: Option<String> = archive_prefix.map(str::to_string);
+    let result = scheduler
+        .run_fs(move || -> Result<(HashMap<String, PathBuf>, PackageFilesIndex), TarballError> {
             // Open the archive in a scope so the buffer + ZipArchive
             // are released before we return — large runtime archives
             // (Node.js for Windows is ~30 MB) keep the buffer alive
@@ -2541,10 +2510,9 @@ async fn fetch_and_extract_zip_once<Reporter: self::Reporter>(
                 )?
             };
             Ok((cas_paths, pkg_files_idx))
-        },
-    )
-    .await
-    .map_err(TarballError::TaskJoin)??;
+        })
+        .await
+        .map_err(TarballError::TaskJoin)??;
 
     tracing::info!(target: "pacquet::download", ?package_url, "Checksum verified");
 

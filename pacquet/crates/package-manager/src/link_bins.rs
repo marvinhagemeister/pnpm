@@ -386,7 +386,7 @@ where
     // directory under a slot that doesn't exist on disk.
     let slot_entries: Vec<(&PackageKey, &SnapshotEntry)> =
         snapshots.iter().filter(|(slot_key, _)| !skipped.contains(slot_key)).collect();
-    crate::install_scheduler::InstallScheduler::current().run_fs_batch(
+    pacquet_scheduler::InstallScheduler::current().run_fs_batch(
         &slot_entries,
         |(slot_key, snapshot)| {
             let children = snapshot
@@ -556,7 +556,7 @@ where
         }
     };
     let slots: Vec<PathBuf> = slots.collect();
-    crate::install_scheduler::InstallScheduler::current().run_fs_batch(&slots, |slot_dir| {
+    pacquet_scheduler::InstallScheduler::current().run_fs_batch(&slots, |slot_dir| {
         let modules_dir = slot_dir.join("node_modules");
         let Some(self_pkg_dir) = find_slot_own_package_dir(slot_dir, &modules_dir) else {
             return Ok(());

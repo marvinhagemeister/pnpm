@@ -18,7 +18,7 @@
 //! graph and a fully-populated CAS index for every package, it
 //! materializes the tree.
 //!
-//! Concurrency goes through [`crate::install_scheduler::InstallScheduler`]:
+//! Concurrency goes through [`pacquet_scheduler::InstallScheduler`]:
 //! the hierarchy walk parallelizes filesystem work at each level (matching
 //! upstream's `await Promise.all(...)` per level), and the scheduler owns the
 //! current rayon-backed implementation detail.
@@ -147,7 +147,7 @@ pub fn link_hoisted_modules<Reporter: self::Reporter>(
     opts: &LinkHoistedModulesOpts<'_>,
 ) -> Result<(), LinkHoistedModulesError> {
     remove_orphans(opts.graph, opts.prev_graph);
-    let scheduler = crate::install_scheduler::InstallScheduler::current();
+    let scheduler = pacquet_scheduler::InstallScheduler::current();
 
     // Drive each importer's hierarchy in parallel — workspace
     // installs (Slice 9) will have multiple importers; the
@@ -169,12 +169,9 @@ pub fn link_hoisted_modules<Reporter: self::Reporter>(
 fn remove_orphans(graph: &DependenciesGraph, prev_graph: Option<&DependenciesGraph>) {
     let Some(prev) = prev_graph else { return };
     let orphan_dirs: Vec<&PathBuf> = prev.keys().filter(|dir| !graph.contains_key(*dir)).collect();
-    crate::install_scheduler::InstallScheduler::current().run_fs_batch_unchecked(
-        &orphan_dirs,
-        |dir| {
-            let _ = try_remove_dir(dir);
-        },
-    );
+    pacquet_scheduler::InstallScheduler::current().run_fs_batch_unchecked(&orphan_dirs, |dir| {
+        let _ = try_remove_dir(dir);
+    });
 }
 
 /// Single-directory rimraf with the same error-swallowing
@@ -196,7 +193,7 @@ fn try_remove_dir(dir: &Path) -> io::Result<()> {
 /// [`linkAllPkgsInOrder`](https://github.com/pnpm/pnpm/blob/94240bc046/installing/deps-restorer/src/linkHoistedModules.ts#L88-L153).
 ///
 /// Each level of the hierarchy is walked as a filesystem batch through
-/// [`crate::install_scheduler::InstallScheduler`]. Children at the
+/// [`pacquet_scheduler::InstallScheduler`]. Children at the
 /// same level can race against each other; the bin-link pass for
 /// `parent_dir/node_modules` runs only after every immediate
 /// child (and its subtree) has been imported, so the read of
@@ -206,7 +203,7 @@ fn link_all_pkgs_in_order<Reporter: self::Reporter>(
     hierarchy: &DepHierarchy,
     parent_dir: &Path,
     opts: &LinkHoistedModulesOpts<'_>,
-    scheduler: &crate::install_scheduler::InstallScheduler,
+    scheduler: &pacquet_scheduler::InstallScheduler,
 ) -> Result<(), LinkHoistedModulesError> {
     // Phase 2: import this level's packages + recurse into each one's
     // children. The side effects are on disk and target disjoint directories.
