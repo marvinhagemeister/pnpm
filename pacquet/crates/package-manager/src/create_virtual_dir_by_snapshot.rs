@@ -1,6 +1,7 @@
 use crate::{
     ImportIndexedDirError, ImportIndexedDirOpts, SkippedSnapshots, SymlinkPackageError,
     VirtualStoreLayout, create_symlink_layout, import_indexed_dir,
+    package_instance_cache::try_populate_from_package_instance,
 };
 use derive_more::{Display, Error};
 use miette::Diagnostic;
@@ -43,6 +44,7 @@ pub struct CreateVirtualDirBySnapshot<'a> {
     /// per-package counts) can read it without rethreading.
     pub package_id: &'a str,
     pub package_tree_dir: Option<PathBuf>,
+    pub package_instance_dir: Option<PathBuf>,
     pub package_key: &'a PackageKey,
     pub snapshot: &'a SnapshotEntry,
     /// Snapshots whose slots were not materialized on this host —
@@ -84,6 +86,7 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
             requester,
             package_id,
             package_tree_dir,
+            package_instance_dir,
             package_key,
             snapshot,
             skipped,
@@ -106,14 +109,26 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
         let save_path = virtual_node_modules_dir.join(package_key.name.to_string());
 
         let import_start = trace_materialize.then(Instant::now);
-        import_indexed_dir::<Reporter>(
-            logged_methods,
-            import_method,
-            &save_path,
-            cas_paths,
-            ImportIndexedDirOpts { package_tree_dir, ..ImportIndexedDirOpts::default() },
-        )
-        .map_err(CreateVirtualDirError::ImportIndexedDir)?;
+        let populated_from_instance = package_instance_dir.as_deref().is_some_and(|dir| {
+            try_populate_from_package_instance::<Reporter>(
+                logged_methods,
+                import_method,
+                &save_path,
+                cas_paths,
+                dir,
+                package_tree_dir.as_deref(),
+            )
+        });
+        if !populated_from_instance {
+            import_indexed_dir::<Reporter>(
+                logged_methods,
+                import_method,
+                &save_path,
+                cas_paths,
+                ImportIndexedDirOpts { package_tree_dir, ..ImportIndexedDirOpts::default() },
+            )
+            .map_err(CreateVirtualDirError::ImportIndexedDir)?;
+        }
         let import_ms = import_start.map(elapsed_ms);
 
         let symlink_start = trace_materialize.then(Instant::now);

@@ -346,7 +346,7 @@ fn elapsed_ms(start: std::time::Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
-fn package_tree_supported(import_method: PackageImportMethod) -> bool {
+pub(crate) fn package_tree_supported(import_method: PackageImportMethod) -> bool {
     cfg!(target_os = "macos")
         && matches!(
             import_method,
@@ -403,7 +403,7 @@ fn build_package_tree<Reporter: self::Reporter>(
     }
 }
 
-fn package_tree_fingerprint(cas_paths: &HashMap<String, PathBuf>) -> String {
+pub(crate) fn package_tree_fingerprint(cas_paths: &HashMap<String, PathBuf>) -> String {
     let mut entries: Vec<_> =
         cas_paths.iter().map(|(rel, path)| format!("{rel}\0{}", path.display())).collect();
     entries.sort_unstable();
@@ -411,7 +411,7 @@ fn package_tree_fingerprint(cas_paths: &HashMap<String, PathBuf>) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn clone_package_tree(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn clone_package_tree(from: &Path, to: &Path) -> io::Result<()> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -419,7 +419,7 @@ fn clone_package_tree(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn clone_package_tree(_from: &Path, _to: &Path) -> io::Result<()> {
+pub(crate) fn clone_package_tree(_from: &Path, _to: &Path) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "package tree clone is only enabled on macOS"))
 }
 
@@ -635,7 +635,7 @@ fn remove_non_dir_dirent(path: &Path, file_type: fs::FileType) -> io::Result<()>
 /// wall-clock nanos + an atomic counter; we only need a process-local
 /// guarantee because rayon worker threads are the only concurrent
 /// callers.
-fn pick_stage_path(target: &Path) -> PathBuf {
+pub(crate) fn pick_stage_path(target: &Path) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("dir");

@@ -26,6 +26,7 @@ mod link_hoisted_modules;
 mod optimistic_repeat_install;
 mod overrides;
 mod package_extender;
+mod package_instance_cache;
 mod prefetching_resolver;
 mod remove;
 mod retry_config;

@@ -1,6 +1,7 @@
 use crate::{
     AllowBuildPolicy, CreateVirtualDirBySnapshot, CreateVirtualDirError, VirtualStoreLayout,
-    import_indexed_dir::package_tree_dir, retry_config::retry_opts_from_config,
+    import_indexed_dir::package_tree_dir, package_instance_cache::package_instance_dir,
+    retry_config::retry_opts_from_config,
 };
 use derive_more::{Display, Error};
 use miette::Diagnostic;
@@ -485,6 +486,11 @@ impl<'a> InstallPackageBySnapshot<'a> {
                 requester,
                 package_id: &package_id,
                 package_tree_dir: Some(package_tree_dir(config.store_dir.root(), &package_id)),
+                package_instance_dir: Some(package_instance_dir(
+                    config.store_dir.root(),
+                    package_key,
+                    &cas_paths,
+                )),
                 package_key,
                 snapshot,
                 skipped,
