@@ -28,15 +28,13 @@ pub async fn main() -> miette::Result<()> {
     args.run(&config_overrides).await
 }
 
-/// Size rayon's global pool at `2 × available_parallelism`. The link
-/// phase is dominated by clonefile / hardlink syscalls that block the
-/// calling thread on the kernel's metadata journal, not by CPU work,
-/// so oversubscribing CPUs gives more in-flight syscalls and a higher
-/// effective throughput. Empirically sweeping 4-200 threads on a
-/// 1352-package warm install on macOS APFS, 2× was the knee — fewer
-/// threads underutilize the journal, way more (100+) loses to context
-/// switching and per-thread fixed costs (`user` time scales linearly
-/// past 50 without any wall-time payoff).
+/// Size rayon's global pool for pacquet's remaining package-level
+/// filesystem work. On macOS, the hot warm-install path now materializes
+/// packages via one APFS `clonefile` per package-shaped cache tree, so
+/// 4 threads keeps the metadata journal busy without multiplying blocked
+/// syscall workers. That matches Deno's macOS npm-cache writer limit and
+/// local package-tree measurements (`RAYON_NUM_THREADS=4` had the same
+/// wall time as the default while burning less system time).
 ///
 /// Use [`std::thread::available_parallelism`] rather than the
 /// workspace's existing `num_cpus::get()` so cgroup / CPU-quota
@@ -45,16 +43,10 @@ pub async fn main() -> miette::Result<()> {
 /// runner can spin up far more rayon threads than the kernel will
 /// actually schedule onto our cores (Copilot review on [#292]).
 ///
-/// **Floor of 4 threads is intentional.** A 1-2-CPU CI runner left
-/// at `2 × parallelism` would be capped to 2-4 rayon threads, and
-/// at that point we go back to the original "one rayon thread is
-/// blocked on a `clonefile` while the next fully-ready snapshot
-/// can't even start" pattern that the 2× tuning is trying to
-/// avoid. The kernel metadata journal is the bottleneck even on
-/// small hosts, so a small intentional oversubscription
-/// (max(4, 2 × parallelism)) is a better trade than respecting the
-/// quota literally — Copilot's follow-up flagged the tension; we're
-/// keeping the floor and documenting it explicitly.
+/// Non-macOS still uses `max(4, 2 × available_parallelism)` for now.
+/// Those platforms do not have the macOS directory-clone fast path yet,
+/// so warm installs can still fall back to per-file hardlink/copy work
+/// where some oversubscription hides blocking filesystem calls.
 ///
 /// Honours an explicit `RAYON_NUM_THREADS` env var by skipping our
 /// override (rayon's `build_global` errors if a pool is already set,
@@ -68,14 +60,17 @@ fn configure_rayon_pool() {
     if std::env::var_os("RAYON_NUM_THREADS").is_some() {
         return;
     }
-    let n = std::thread::available_parallelism()
+    let n = configured_rayon_threads();
+    let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
+}
+
+fn configured_rayon_threads() -> usize {
+    if cfg!(target_os = "macos") {
+        return 4;
+    }
+    std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
         .saturating_mul(2)
-        // `.max(4)` is an intentional minimum: even on quota-limited
-        // 1-2-CPU runners, dropping below 4 puts us back into the
-        // "rayon worker stalls on `clonefile` while the next snapshot
-        // can't start" regime. See the function-level doc.
-        .max(4);
-    let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
+        .max(4)
 }

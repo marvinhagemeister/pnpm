@@ -12,14 +12,11 @@ use pacquet_reporter::{
 };
 use std::{collections::HashMap, fs, io, path::PathBuf, sync::atomic::AtomicU8};
 
-/// This subroutine creates the virtual-store slot for one package and then
-/// runs the two post-extraction tasks — CAS file import and intra-package
-/// symlink creation — in parallel via `rayon::join`.
-///
-/// Symlinks don't depend on CAS file contents, only on the resolved dep graph,
-/// so overlapping them with the import saves the serial symlink time per
-/// snapshot (~1-3 ms). Across a big lockfile those savings stack up on the
-/// install's critical-path tail.
+/// This subroutine creates the virtual-store slot for one package, imports its
+/// files, and then creates the package's dependency symlinks. The caller drives
+/// many snapshots in parallel; inside one snapshot, keeping the operations
+/// serial avoids nested rayon work now that the macOS import fast path is one
+/// package-tree clone instead of one task per file.
 #[must_use]
 pub struct CreateVirtualDirBySnapshot<'a> {
     /// Per-install precomputed slot-directory mapping. Replaces the
@@ -102,38 +99,24 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
 
         let save_path = virtual_node_modules_dir.join(package_key.name.to_string());
 
-        // `rayon::join` runs both closures in parallel on rayon's pool,
-        // returning only once both finish. `import_indexed_dir` is itself
-        // a rayon par_iter over CAS entries; `create_symlink_layout` is
-        // a small serial loop over dep refs. Overlapping them saves the
-        // symlink time from the per-snapshot critical path without any
-        // cross-thread data marshaling — both closures borrow from the
-        // current stack frame.
-        let (cas_result, symlink_result) = rayon::join(
-            || {
-                import_indexed_dir::<Reporter>(
-                    logged_methods,
-                    import_method,
-                    &save_path,
-                    cas_paths,
-                    ImportIndexedDirOpts { package_tree_dir, ..ImportIndexedDirOpts::default() },
-                )
-                .map_err(CreateVirtualDirError::ImportIndexedDir)
-            },
-            || {
-                create_symlink_layout(
-                    snapshot.dependencies.as_ref(),
-                    snapshot.optional_dependencies.as_ref(),
-                    &package_key.name,
-                    skipped,
-                    layout,
-                    &virtual_node_modules_dir,
-                )
-                .map_err(CreateVirtualDirError::SymlinkPackage)
-            },
-        );
-        cas_result?;
-        symlink_result?;
+        import_indexed_dir::<Reporter>(
+            logged_methods,
+            import_method,
+            &save_path,
+            cas_paths,
+            ImportIndexedDirOpts { package_tree_dir, ..ImportIndexedDirOpts::default() },
+        )
+        .map_err(CreateVirtualDirError::ImportIndexedDir)?;
+
+        create_symlink_layout(
+            snapshot.dependencies.as_ref(),
+            snapshot.optional_dependencies.as_ref(),
+            &package_key.name,
+            skipped,
+            layout,
+            &virtual_node_modules_dir,
+        )
+        .map_err(CreateVirtualDirError::SymlinkPackage)?;
 
         // `pnpm:progress imported` mirrors pnpm's emit at
         // <https://github.com/pnpm/pnpm/blob/086c5e91e8/installing/deps-installer/src/install/link.ts#L498>:

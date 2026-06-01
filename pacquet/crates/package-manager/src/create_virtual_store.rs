@@ -534,14 +534,13 @@ impl<'a> CreateVirtualStore<'a> {
         // ≈ wall` (~10 s sum on a 10 s wall, i.e. effectively 1×
         // parallelism) even though `try_join_all` was meant to fan
         // futures across tokio's 10 worker threads. Each future's sync
-        // `rayon::join` pinned one tokio worker; with up to 10 such
-        // futures progressing concurrently, each one's inner par_iter
-        // saturated rayon's pool, and the pool ended up processing one
-        // snapshot at a time. Going straight to rayon via a single
-        // `par_iter` lets the pool schedule across all 1352 snapshots
-        // as one work-stealing graph — the shape pnpm's piscina pool
-        // gives implicitly. On the same benchmark, wall dropped from
-        // ~10 s to ~6.5 s.
+        // per-snapshot futures pinned tokio workers while each snapshot
+        // entered rayon again for filesystem work, and the pool ended
+        // up processing one snapshot at a time. Going straight to rayon
+        // via a single package-level `par_iter` lets the pool schedule
+        // across all 1352 snapshots as one work-stealing graph — the
+        // shape pnpm's piscina pool gives implicitly. On the same
+        // benchmark, wall dropped from ~10 s to ~6.5 s.
         //
         // The `par_iter` blocks the calling thread for the duration of
         // the warm batch. The cold-batch fetches run *after* this
