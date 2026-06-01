@@ -1,6 +1,5 @@
 use super::{
-    CreateVirtualStoreError, InstallPackageBySnapshotError, emit_warm_snapshot_progress,
-    integrity_equal, snapshot_cache_key, snapshot_deps_equal,
+    emit_warm_snapshot_progress, integrity_equal, snapshot_cache_key, snapshot_deps_equal,
 };
 use pacquet_lockfile::{
     GitResolution, LockfileResolution, PackageKey, PackageMetadata, PkgName, PkgVerPeer,
@@ -255,25 +254,21 @@ fn snapshot_cache_key_for_git_hosted_tarball_uses_git_hosted_key() {
     );
 }
 
-/// Failing closed at the cache-key site (rather than only at the
-/// install-side guard) is the whole point of the check duplication —
-/// otherwise a malformed lockfile burns the warm rayon batch before
-/// the install path fires the same error.
 #[test]
-fn snapshot_cache_key_rejects_tarball_without_integrity() {
+fn snapshot_cache_key_uses_url_fallback_for_tarball_without_integrity() {
     let pkg = key("foo", "1.0.0");
     let packages = HashMap::from([(pkg.clone(), tarball_metadata_without_integrity())]);
 
-    let err =
-        snapshot_cache_key(&pkg, &packages).expect_err("missing integrity must reject upfront");
-    assert!(
-        matches!(
-            &err,
-            CreateVirtualStoreError::InstallPackageBySnapshot(
-                InstallPackageBySnapshotError::MissingTarballIntegrity { package_key },
-            ) if package_key == &pkg.to_string(),
-        ),
-        "expected MissingTarballIntegrity for `{pkg}`, got {err:?}",
+    let received = snapshot_cache_key(&pkg, &packages).expect("missing integrity uses URL key");
+    assert_eq!(
+        received,
+        Some(format!(
+            "url:{}\t{}",
+            pacquet_crypto_hash::create_short_hash(
+                "https://registry.npmjs.org/foo/-/foo-1.0.0.tgz"
+            ),
+            pkg
+        ))
     );
 }
 

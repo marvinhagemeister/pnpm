@@ -1382,13 +1382,23 @@ pub struct DownloadTarballToStore<'a> {
     /// `Arc<DashSet<PathBuf>>` at install bootstrap and pass the same
     /// handle to every `DownloadTarballToStore`.
     pub verified_files_cache: SharedVerifiedFilesCache,
-    pub package_integrity: &'a Integrity,
+    /// Expected tarball integrity from the lockfile or registry metadata.
+    /// Some URL-only tarball lockfile entries omit it; those cannot use
+    /// integrity-keyed cache lookup before download, but the fetch still
+    /// computes an integrity and stores the resulting file index under it.
+    pub package_integrity: Option<&'a Integrity>,
     pub package_unpacked_size: Option<usize>,
     pub package_url: &'a str,
     /// Stable identifier for the package, e.g. `"{name}@{version}"`. Paired
     /// with `package_integrity` to form the SQLite index key per pnpm v11's
     /// `storeIndexKey`.
     pub package_id: &'a str,
+    /// Pacquet-only fallback cache key for URL tarballs whose lockfile
+    /// resolution does not carry an integrity. The download still computes
+    /// and writes the pnpm-compatible integrity key; this additional key lets
+    /// later frozen installs reuse the same CAFS entry before the lockfile has
+    /// been refreshed with the computed integrity.
+    pub package_cache_key: Option<String>,
     /// URL-keyed `Authorization` header lookup, built from the parsed
     /// `.npmrc` creds. Resolved per request so a tarball served from a
     /// different host than the registry still picks up its own header.
@@ -1938,6 +1948,7 @@ impl<'a> DownloadTarballToStore<'a> {
             package_url,
             package_id,
             package_integrity,
+            ref package_cache_key,
             prefetched_cas_paths,
             requester,
             ..
@@ -1960,8 +1971,10 @@ impl<'a> DownloadTarballToStore<'a> {
         // without re-checking the prefetched map. Matches what the
         // normal path does with the result of
         // [`Self::run_without_mem_cache`].
-        if let Some(prefetched) = prefetched_cas_paths {
-            let cache_key = store_index_key(&package_integrity.to_string(), package_id);
+        if let (Some(prefetched), Some(cache_key)) = (
+            prefetched_cas_paths,
+            package_cache_key_for_read(package_integrity, package_id, package_cache_key.as_deref()),
+        ) {
             if let Some(cas_paths) = prefetched.get(&cache_key) {
                 tracing::info!(
                     target: "pacquet::download",
@@ -2102,6 +2115,7 @@ impl<'a> DownloadTarballToStore<'a> {
             http_client,
             store_dir,
             package_integrity,
+            ref package_cache_key,
             package_unpacked_size,
             package_url,
             package_id,
@@ -2133,7 +2147,6 @@ impl<'a> DownloadTarballToStore<'a> {
         // The lookup is best-effort. A missing `index.db`, a missing row,
         // an undecodable entry, or any CAFS file that has gone missing
         // from disk all fall through to the download path below.
-        let cache_key = store_index_key(&package_integrity.to_string(), package_id);
         // Hot path on warm installs: the install-scoped `prefetch_cas_paths`
         // task already ran one batched SELECT + integrity-check pass for
         // every (integrity, pkg_id) the lockfile mentions. If our key is
@@ -2153,8 +2166,10 @@ impl<'a> DownloadTarballToStore<'a> {
         // run. Propagating the `Arc` through this signature would
         // require a wider refactor of `DownloadTarballToStore`'s
         // return type.
-        if let Some(prefetched) = prefetched_cas_paths
-            && let Some(cas_paths) = prefetched.get(&cache_key)
+        let cache_key =
+            package_cache_key_for_read(package_integrity, package_id, package_cache_key.as_deref());
+        if let (Some(prefetched), Some(cache_key)) = (prefetched_cas_paths, cache_key.as_deref())
+            && let Some(cas_paths) = prefetched.get(cache_key)
         {
             tracing::info!(
                 target: "pacquet::download",
@@ -2165,14 +2180,15 @@ impl<'a> DownloadTarballToStore<'a> {
             emit_progress_found_in_store::<Reporter>(package_id, requester);
             return Ok((**cas_paths).clone());
         }
-        if let Some(cas_paths) = load_cached_cas_paths(
-            store_index,
-            store_dir,
-            cache_key,
-            verify_store_integrity,
-            verified_files_cache,
-        )
-        .await
+        if let Some(cache_key) = cache_key.as_deref()
+            && let Some(cas_paths) = load_cached_cas_paths(
+                store_index,
+                store_dir,
+                cache_key.to_string(),
+                verify_store_integrity,
+                verified_files_cache,
+            )
+            .await
         {
             tracing::info!(target: "pacquet::download", ?package_url, ?package_id, "Reusing cached CAFS entry — skipping download");
             emit_progress_found_in_store::<Reporter>(package_id, requester);
@@ -2210,11 +2226,11 @@ impl<'a> DownloadTarballToStore<'a> {
         // parsing recovers via re-fetch instead of aborting the install
         // (<https://github.com/pnpm/pacquet/issues/259>). Only HTTP 401 / 403 / 404 fail fast — see
         // [`is_transient_error`].
-        let (_computed_integrity, cas_paths, pkg_files_idx) =
+        let (computed_integrity, cas_paths, pkg_files_idx) =
             fetch_and_extract_with_retry::<Reporter>(
                 http_client,
                 package_url,
-                Some(package_integrity),
+                package_integrity,
                 package_unpacked_size,
                 package_id,
                 requester,
@@ -2235,9 +2251,12 @@ impl<'a> DownloadTarballToStore<'a> {
         // writer failed to open or the caller handed us none — the row
         // is dropped with a `warn!` and the next install misses on this
         // cache key, matching the read path's stance.
-        let index_key = store_index_key(&package_integrity.to_string(), package_id);
+        let index_key = store_index_key(&computed_integrity.to_string(), package_id);
         if let Some(writer) = store_index_writer {
-            writer.queue(index_key, pkg_files_idx);
+            writer.queue(index_key, pkg_files_idx.clone());
+            if let Some(package_cache_key) = package_cache_key {
+                writer.queue(package_cache_key.to_string(), pkg_files_idx);
+            }
         } else {
             tracing::warn!(
                 target: "pacquet::download",
@@ -2248,6 +2267,16 @@ impl<'a> DownloadTarballToStore<'a> {
 
         Ok(cas_paths)
     }
+}
+
+fn package_cache_key_for_read(
+    package_integrity: Option<&Integrity>,
+    package_id: &str,
+    package_cache_key: Option<&str>,
+) -> Option<String> {
+    package_integrity
+        .map(|integrity| store_index_key(&integrity.to_string(), package_id))
+        .or_else(|| package_cache_key.map(str::to_string))
 }
 
 /// Outcome of [`FetchTarballForResolution::run`]: the sha512 integrity

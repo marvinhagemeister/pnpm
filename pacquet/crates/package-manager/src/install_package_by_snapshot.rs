@@ -107,12 +107,6 @@ pub enum InstallPackageBySnapshotError {
     CreateVirtualDir(#[error(source)] CreateVirtualDirError),
 
     #[display(
-        "Package `{package_key}` has a tarball resolution without an `integrity` field; pacquet cannot verify the download and refuses to install it."
-    )]
-    #[diagnostic(code(pacquet_package_manager::missing_tarball_integrity))]
-    MissingTarballIntegrity { package_key: String },
-
-    #[display(
         "Package `{package_key}` uses a `{resolution_kind}` resolution, which pacquet does not yet support."
     )]
     #[diagnostic(code(pacquet_package_manager::unsupported_resolution))]
@@ -255,7 +249,7 @@ impl<'a> InstallPackageBySnapshot<'a> {
         let cas_paths: HashMap<String, PathBuf> = match &metadata.resolution {
             LockfileResolution::Tarball(_) | LockfileResolution::Registry(_) => {
                 let (tarball_url, integrity) =
-                    tarball_url_and_integrity(&metadata.resolution, package_key, config)?;
+                    tarball_url_and_integrity(&metadata.resolution, package_key, config);
                 let raw_cas_paths = DownloadTarballToStore {
                     http_client,
                     store_dir: &config.store_dir,
@@ -267,6 +261,12 @@ impl<'a> InstallPackageBySnapshot<'a> {
                     package_unpacked_size: None,
                     package_url: &tarball_url,
                     package_id: &package_id,
+                    package_cache_key: integrity.is_none().then(|| {
+                        crate::create_virtual_store::url_tarball_store_index_key(
+                            &tarball_url,
+                            &package_id,
+                        )
+                    }),
                     requester,
                     prefetched_cas_paths,
                     retry_opts: retry_opts_from_config(config),
@@ -511,16 +511,12 @@ fn tarball_url_and_integrity<'a>(
     resolution: &'a LockfileResolution,
     package_key: &PackageKey,
     config: &'a Config,
-) -> Result<(Cow<'a, str>, &'a ssri::Integrity), InstallPackageBySnapshotError> {
+) -> (Cow<'a, str>, Option<&'a ssri::Integrity>) {
     match resolution {
-        LockfileResolution::Tarball(tarball_resolution) => {
-            let integrity = tarball_resolution.integrity.as_ref().ok_or_else(|| {
-                InstallPackageBySnapshotError::MissingTarballIntegrity {
-                    package_key: package_key.to_string(),
-                }
-            })?;
-            Ok((tarball_resolution.tarball.as_str().pipe(Cow::Borrowed), integrity))
-        }
+        LockfileResolution::Tarball(tarball_resolution) => (
+            tarball_resolution.tarball.as_str().pipe(Cow::Borrowed),
+            tarball_resolution.integrity.as_ref(),
+        ),
         LockfileResolution::Registry(registry_resolution) => {
             let registry = config.registry_for_package_name(&package_key.name.to_string());
             let registry = registry.strip_suffix('/').map(str::to_string).unwrap_or(registry);
@@ -528,7 +524,7 @@ fn tarball_url_and_integrity<'a>(
             let version = package_key.suffix.version();
             let bare_name = name.bare.as_str();
             let tarball_url = format!("{registry}/{name}/-/{bare_name}-{version}.tgz");
-            Ok((Cow::Owned(tarball_url), &registry_resolution.integrity))
+            (Cow::Owned(tarball_url), Some(&registry_resolution.integrity))
         }
         // Caller (`run`) only invokes this helper for the tarball /
         // registry arms; git, directory, binary, and variations
@@ -693,10 +689,11 @@ async fn fetch_binary_resolution_to_cas<Reporter: self::Reporter>(
             store_index_writer: store_index_writer.cloned(),
             verify_store_integrity: config.verify_store_integrity,
             verified_files_cache: Arc::clone(verified_files_cache),
-            package_integrity: &binary.integrity,
+            package_integrity: Some(&binary.integrity),
             package_unpacked_size: None,
             package_url: &binary.url,
             package_id: &package_id,
+            package_cache_key: None,
             requester,
             prefetched_cas_paths,
             retry_opts: retry_opts_from_config(config),

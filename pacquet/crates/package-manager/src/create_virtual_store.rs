@@ -7,6 +7,7 @@ use derive_more::{Display, Error};
 use futures_util::future;
 use miette::Diagnostic;
 use pacquet_config::{Config, NodeLinker};
+use pacquet_crypto_hash::create_short_hash;
 use pacquet_deps_path::get_pkg_id_with_patch_hash;
 use pacquet_lockfile::{
     LockfileResolution, PackageKey, PackageMetadata, PkgIdWithPatchHash, PkgNameVerPeer,
@@ -763,8 +764,7 @@ impl<'a> CreateVirtualStore<'a> {
                             // <https://github.com/pnpm/pnpm/blob/94240bc046/deps/graph-builder/src/lockfileToDepGraph.ts#L286-L298>.
                             // Local materialization (`CreateVirtualDir`)
                             // and config-shape errors
-                            // (`MissingTarballIntegrity`,
-                            // `UnsupportedResolution`) abort even for
+                            // (`UnsupportedResolution`) abort even for
                             // optional snapshots, matching upstream's
                             // post-fetch `linkPkg` path which sits
                             // outside the catch.
@@ -899,20 +899,10 @@ fn snapshot_cache_key(
             // scripts becomes configurable both sites flip together.
             Ok(Some(git_hosted_store_index_key(&pkg_id, true)))
         }
-        LockfileResolution::Tarball(t) => {
-            let integrity = t
-                .integrity
-                .as_ref()
-                .ok_or_else(|| {
-                    CreateVirtualStoreError::InstallPackageBySnapshot(
-                        InstallPackageBySnapshotError::MissingTarballIntegrity {
-                            package_key: snapshot_key.to_string(),
-                        },
-                    )
-                })?
-                .to_string();
-            Ok(Some(store_index_key(&integrity, &pkg_id)))
-        }
+        LockfileResolution::Tarball(t) => Ok(Some(match t.integrity.as_ref() {
+            Some(integrity) => store_index_key(&integrity.to_string(), &pkg_id),
+            None => url_tarball_store_index_key(&t.tarball, &pkg_id),
+        })),
         LockfileResolution::Registry(r) => {
             Ok(Some(store_index_key(&r.integrity.to_string(), &pkg_id)))
         }
@@ -1055,9 +1045,12 @@ fn integrity_equal(current: Option<&PackageMetadata>, wanted: Option<&PackageMet
 ///
 /// - `CreateVirtualDir` — local materialization (clone / hardlink /
 ///   copy / symlink from CAS into the slot dir).
-/// - `MissingTarballIntegrity`, `UnsupportedResolution` —
-///   config/shape errors; upstream's equivalents `throw` rather
+/// - `UnsupportedResolution` — config/shape errors; upstream's equivalents `throw` rather
 ///   than going through `fetchPackage`.
+pub(crate) fn url_tarball_store_index_key(tarball_url: &str, package_id: &str) -> String {
+    format!("url:{}\t{}", create_short_hash(tarball_url), package_id)
+}
+
 fn is_fetch_side_failure(err: &InstallPackageBySnapshotError) -> bool {
     matches!(
         err,

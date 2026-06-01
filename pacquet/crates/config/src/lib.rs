@@ -1855,12 +1855,17 @@ fn read_legacy_package_pnpm_settings(dir: &std::path::Path) -> Option<WorkspaceS
                 .collect::<IndexMap<_, _>>()
         })
         .filter(|map| !map.is_empty());
+    let package_extensions = pnpm
+        .get("packageExtensions")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .filter(|map: &IndexMap<String, workspace_yaml::PackageExtension>| !map.is_empty());
 
-    if overrides.is_none() {
+    if overrides.is_none() && package_extensions.is_none() {
         return None;
     }
 
-    Some(WorkspaceSettings { overrides, ..Default::default() })
+    Some(WorkspaceSettings { overrides, package_extensions, ..Default::default() })
 }
 
 /// Port of pnpm's `readEnvVar`: read `pnpm_config_<lower>`, falling

@@ -687,6 +687,41 @@ pub fn pnpm_workspace_yaml_registry_overrides_npmrc_registry() {
 }
 
 #[test]
+pub fn package_json_pnpm_package_extensions_are_loaded_for_legacy_compatibility() {
+    let tmp = tempdir().unwrap();
+    fs::write(
+        tmp.path().join("package.json"),
+        r#"{
+  "name": "legacy-package-extensions",
+  "pnpm": {
+    "packageExtensions": {
+      "left-pad@1": {
+        "dependencies": {
+          "is-positive": "1.0.0"
+        }
+      }
+    }
+  }
+}
+"#,
+    )
+    .expect("write package.json");
+
+    let config =
+        Config::new().current::<HostNoHome>(tmp.path()).expect("workspace yaml absent => no error");
+    assert_eq!(
+        config
+            .package_extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("left-pad@1"))
+            .and_then(|extension| extension.dependencies.as_ref())
+            .and_then(|dependencies| dependencies.get("is-positive"))
+            .map(String::as_str),
+        Some("1.0.0")
+    );
+}
+
+#[test]
 pub fn pnpm_workspace_yaml_found_by_walking_up() {
     let tmp = tempdir().unwrap();
     let nested = tmp.path().join("packages/inner");

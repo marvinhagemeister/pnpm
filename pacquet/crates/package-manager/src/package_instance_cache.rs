@@ -41,7 +41,6 @@ pub(crate) fn try_populate_from_package_instance<Reporter: self::Reporter>(
     dir_path: &Path,
     cas_paths: &HashMap<String, PathBuf>,
     package_instance: &PackageInstanceEntry,
-    package_key: &PackageKey,
     package_tree_dir: Option<&Path>,
 ) -> bool {
     if !package_tree_supported(import_method) {
@@ -53,12 +52,7 @@ pub(crate) fn try_populate_from_package_instance<Reporter: self::Reporter>(
     let total_start = trace_instance.then(std::time::Instant::now);
 
     let sentinel_start = trace_instance.then(std::time::Instant::now);
-    let initialized = has_matching_metadata(
-        &package_instance.dir,
-        package_key,
-        &package_instance.fingerprint,
-        cas_paths.len(),
-    );
+    let initialized = has_matching_metadata(&package_instance.dir);
     let sentinel_ms = sentinel_start.map(elapsed_ms);
 
     let build_start = trace_instance.then(std::time::Instant::now);
@@ -68,7 +62,6 @@ pub(crate) fn try_populate_from_package_instance<Reporter: self::Reporter>(
             import_method,
             cas_paths,
             &package_instance.dir,
-            package_key,
             package_tree_dir,
             &package_instance.fingerprint,
         )
@@ -123,7 +116,6 @@ fn build_package_instance<Reporter: self::Reporter>(
     import_method: PackageImportMethod,
     cas_paths: &HashMap<String, PathBuf>,
     package_instance_dir: &Path,
-    package_key: &PackageKey,
     package_tree_dir: Option<&Path>,
     fingerprint: &str,
 ) -> io::Result<()> {
@@ -147,7 +139,6 @@ fn build_package_instance<Reporter: self::Reporter>(
         return Err(io::Error::other(error.to_string()));
     }
 
-    write_metadata(&stage, package_key, fingerprint, cas_paths.len())?;
     fs::write(stage.join(".initialized"), fingerprint)?;
     match fs::rename(&stage, package_instance_dir) {
         Ok(()) => Ok(()),
@@ -181,42 +172,9 @@ fn is_existing_dir_error(error: &io::Error) -> bool {
     matches!(error.kind(), io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty)
 }
 
-fn has_matching_metadata(
-    package_instance_dir: &Path,
-    package_key: &PackageKey,
-    fingerprint: &str,
-    file_count: usize,
-) -> bool {
-    let package_key = package_key.to_string();
-    let Ok(bytes) = fs::read(package_instance_dir.join("instance.json")) else {
-        return false;
-    };
-    let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return false;
-    };
-    metadata.get("schema").and_then(serde_json::Value::as_u64) == Some(1)
-        && metadata.get("package_key").and_then(serde_json::Value::as_str)
-            == Some(package_key.as_str())
-        && metadata.get("content_fingerprint").and_then(serde_json::Value::as_str)
-            == Some(fingerprint)
-        && metadata.get("file_count").and_then(serde_json::Value::as_u64) == Some(file_count as u64)
+fn has_matching_metadata(package_instance_dir: &Path) -> bool {
+    package_instance_dir.join(".initialized").is_file()
         && package_instance_dir.join("files").is_dir()
-}
-
-fn write_metadata(
-    package_instance_dir: &Path,
-    package_key: &PackageKey,
-    fingerprint: &str,
-    file_count: usize,
-) -> io::Result<()> {
-    let metadata = serde_json::json!({
-        "schema": 1,
-        "package_key": package_key.to_string(),
-        "content_fingerprint": fingerprint,
-        "file_count": file_count,
-    });
-    let bytes = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
-    fs::write(package_instance_dir.join("instance.json"), bytes)
 }
 
 fn elapsed_ms(start: std::time::Instant) -> f64 {
@@ -225,23 +183,17 @@ fn elapsed_ms(start: std::time::Instant) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_matching_metadata, write_metadata};
-    use pacquet_lockfile::PackageKey;
+    use super::has_matching_metadata;
     use tempfile::tempdir;
 
     #[test]
-    fn metadata_match_requires_expected_package_key_fingerprint_and_file_count() {
+    fn metadata_match_uses_initialized_sentinel_and_files_dir() {
         let dir = tempdir().expect("tempdir");
-        let package_key: PackageKey = "react@18.0.0".parse().expect("valid package key");
         std::fs::create_dir(dir.path().join("files")).expect("files dir");
+        std::fs::write(dir.path().join(".initialized"), "abc123").expect("write sentinel");
 
-        write_metadata(dir.path(), &package_key, "abc123", 2).expect("write metadata");
-
-        assert!(has_matching_metadata(dir.path(), &package_key, "abc123", 2));
-        assert!(!has_matching_metadata(dir.path(), &package_key, "different", 2));
-        assert!(!has_matching_metadata(dir.path(), &package_key, "abc123", 3));
-
-        let other_key: PackageKey = "preact@10.0.0".parse().expect("valid package key");
-        assert!(!has_matching_metadata(dir.path(), &other_key, "abc123", 2));
+        assert!(has_matching_metadata(dir.path()));
+        std::fs::remove_file(dir.path().join(".initialized")).expect("remove sentinel");
+        assert!(!has_matching_metadata(dir.path()));
     }
 }

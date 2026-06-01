@@ -116,7 +116,6 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
                 &save_path,
                 cas_paths,
                 instance,
-                package_key,
                 package_tree_dir.as_deref(),
             )
         });
