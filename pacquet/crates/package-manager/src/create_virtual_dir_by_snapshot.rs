@@ -10,7 +10,7 @@ use pacquet_reporter::{
     LogEvent, LogLevel, PackageImportMethod as WireImportMethod, ProgressLog, ProgressMessage,
     Reporter,
 };
-use std::{collections::HashMap, fs, io, path::PathBuf, sync::atomic::AtomicU8};
+use std::{collections::HashMap, fs, io, path::PathBuf, sync::atomic::AtomicU8, time::Instant};
 
 /// This subroutine creates the virtual-store slot for one package, imports its
 /// files, and then creates the package's dependency symlinks. The caller drives
@@ -82,23 +82,30 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
             import_method,
             logged_methods,
             requester,
-            package_id: _package_id,
+            package_id,
             package_tree_dir,
             package_key,
             snapshot,
             skipped,
         } = self;
 
+        let trace_materialize =
+            tracing::enabled!(target: "pacquet::materialize", tracing::Level::DEBUG);
+        let total_start = trace_materialize.then(Instant::now);
+
         let virtual_node_modules_dir = layout.slot_dir(package_key).join("node_modules");
+        let mkdir_start = trace_materialize.then(Instant::now);
         fs::create_dir_all(&virtual_node_modules_dir).map_err(|error| {
             CreateVirtualDirError::CreateNodeModulesDir {
                 dir: virtual_node_modules_dir.clone(),
                 error,
             }
         })?;
+        let mkdir_ms = mkdir_start.map(elapsed_ms);
 
         let save_path = virtual_node_modules_dir.join(package_key.name.to_string());
 
+        let import_start = trace_materialize.then(Instant::now);
         import_indexed_dir::<Reporter>(
             logged_methods,
             import_method,
@@ -107,7 +114,9 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
             ImportIndexedDirOpts { package_tree_dir, ..ImportIndexedDirOpts::default() },
         )
         .map_err(CreateVirtualDirError::ImportIndexedDir)?;
+        let import_ms = import_start.map(elapsed_ms);
 
+        let symlink_start = trace_materialize.then(Instant::now);
         create_symlink_layout(
             snapshot.dependencies.as_ref(),
             snapshot.optional_dependencies.as_ref(),
@@ -117,6 +126,7 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
             &virtual_node_modules_dir,
         )
         .map_err(CreateVirtualDirError::SymlinkPackage)?;
+        let symlink_ms = symlink_start.map(elapsed_ms);
 
         // `pnpm:progress imported` mirrors pnpm's emit at
         // <https://github.com/pnpm/pnpm/blob/086c5e91e8/installing/deps-installer/src/install/link.ts#L498>:
@@ -130,6 +140,7 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
         // explicit settings as-is). Refining to per-package resolution
         // would require threading the resolved method back from
         // `link_file`; tracked under <https://github.com/pnpm/pacquet/issues/347>.
+        let progress_start = trace_materialize.then(Instant::now);
         Reporter::emit(&LogEvent::Progress(ProgressLog {
             level: LogLevel::Debug,
             message: ProgressMessage::Imported {
@@ -138,9 +149,28 @@ impl<'a> CreateVirtualDirBySnapshot<'a> {
                 to: save_path.to_string_lossy().into_owned(),
             },
         }));
+        let progress_ms = progress_start.map(elapsed_ms);
+
+        if let Some(total_start) = total_start {
+            tracing::debug!(
+                target: "pacquet::materialize",
+                package_id,
+                package_key = %package_key,
+                mkdir_ms = mkdir_ms.unwrap_or_default(),
+                import_ms = import_ms.unwrap_or_default(),
+                symlink_ms = symlink_ms.unwrap_or_default(),
+                progress_ms = progress_ms.unwrap_or_default(),
+                total_ms = elapsed_ms(total_start),
+                "materialized virtual-store package",
+            );
+        }
 
         Ok(())
     }
+}
+
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
 }
 
 /// Map pacquet's configured [`PackageImportMethod`] to the value
