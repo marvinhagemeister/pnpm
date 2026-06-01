@@ -28,6 +28,7 @@ mod overrides;
 mod package_extender;
 mod package_instance_cache;
 mod prefetching_resolver;
+mod project_layout_cache;
 mod remove;
 mod retry_config;
 mod store_init;

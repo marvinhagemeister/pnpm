@@ -3,6 +3,7 @@ use crate::{
     InstallWithFreshLockfile, InstallWithFreshLockfileError, ResolvedPackages, UpdateSeedPolicy,
     build_resolution_verifiers, check_optimistic_repeat_install,
     optimistic_repeat_install::Decision as OptimisticRepeatInstallDecision,
+    project_layout_cache::ProjectLayoutCache,
 };
 use derive_more::{Display, Error};
 use miette::Diagnostic;
@@ -177,6 +178,8 @@ where
     /// short-circuit is also bypassed so an `update` that finds newer
     /// in-range versions isn't skipped as "already up to date".
     pub update_seed_policy: UpdateSeedPolicy,
+    pub layout_cache: bool,
+    pub layout_cache_namespace: Option<String>,
 }
 
 /// Error type of [`Install`].
@@ -365,6 +368,8 @@ where
             node_linker,
             lockfile_only,
             update_seed_policy,
+            layout_cache,
+            layout_cache_namespace,
         } = self;
 
         // `--lockfile-only` with `lockfile: false` (pnpm's
@@ -785,6 +790,45 @@ where
             return Ok(());
         }
 
+        let layout_cache_namespace =
+            layout_cache_namespace.unwrap_or_else(|| workspace_root.to_string_lossy().into_owned());
+        let project_layout_cache = layout_cache
+            .then(|| {
+                ProjectLayoutCache::new(
+                    config,
+                    &layout_cache_namespace,
+                    lockfile_path,
+                    node_linker,
+                    included,
+                )
+            })
+            .flatten();
+
+        if take_frozen_path
+            && !lockfile_only
+            && matches!(node_linker, NodeLinker::Isolated)
+            && let Some(layout_cache) = project_layout_cache.as_ref()
+            && layout_cache.restore(&config.modules_dir)
+        {
+            Reporter::emit(&LogEvent::Pnpm(PnpmLog {
+                level: LogLevel::Info,
+                message: "Restored node_modules from pacquet layout cache".to_string(),
+                prefix: prefix.clone(),
+            }));
+            Reporter::emit(&LogEvent::Stage(StageLog {
+                level: LogLevel::Debug,
+                prefix: prefix.clone(),
+                stage: Stage::ImportingDone,
+            }));
+            update_workspace_state(
+                &workspace_root,
+                &build_workspace_state(config, node_linker, included, &project_manifests),
+            )
+            .map_err(InstallError::WriteWorkspaceState)?;
+            Reporter::emit(&LogEvent::Summary(SummaryLog { level: LogLevel::Debug, prefix }));
+            return Ok(());
+        }
+
         // No-op short-circuit. When the frozen-lockfile dispatch is
         // eligible, the on-disk `.modules.yaml` agrees with the current
         // config, and `<virtual_store_dir>/lock.yaml` is byte-equal to
@@ -1115,6 +1159,12 @@ where
             &build_workspace_state(config, node_linker, included, &project_manifests),
         )
         .map_err(InstallError::WriteWorkspaceState)?;
+
+        if matches!(node_linker, NodeLinker::Isolated)
+            && let Some(layout_cache) = project_layout_cache.as_ref()
+        {
+            layout_cache.store(&config.modules_dir);
+        }
 
         // `pnpm:summary` closes the install and lets the reporter render
         // the accumulated `pnpm:root` events as a "+N -M" block. Must

@@ -112,6 +112,8 @@ pub async fn resolve(
         node_linker: NodeLinker::Isolated,
         lockfile_only: true,
         update_seed_policy: pacquet_package_manager::UpdateSeedPolicy::KeepAll,
+        layout_cache: false,
+        layout_cache_namespace: None,
     }
     .run::<SilentReporter>()
     .await
@@ -196,6 +198,7 @@ pub async fn fetch_uncached(
                 prefetched_cas_paths: None,
                 retry_opts: RetryOpts::default(),
                 ignore_file_pattern: None,
+                package_tree_dir: None,
                 offline: false,
             }
             .run_without_mem_cache::<SilentReporter>()

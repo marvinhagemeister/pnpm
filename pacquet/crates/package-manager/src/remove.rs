@@ -139,6 +139,8 @@ impl<'a> Remove<'a> {
             // every remaining lockfile pin in the preferred-versions
             // seed, same as `install` / `add`.
             update_seed_policy: UpdateSeedPolicy::KeepAll,
+            layout_cache: false,
+            layout_cache_namespace: None,
         }
         .run::<Reporter>()
         .await

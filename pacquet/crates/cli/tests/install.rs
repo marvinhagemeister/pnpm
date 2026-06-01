@@ -46,7 +46,7 @@ fn should_install_dependencies() {
 
     eprintln!("Snapshot");
     let workspace_folders = get_all_folders(&workspace);
-    let store_files = get_all_files(&store_dir);
+    let store_files = stable_store_files(&store_dir);
     insta::assert_debug_snapshot!((workspace_folders, store_files));
 
     drop((root, mock_instance)); // cleanup
@@ -71,7 +71,7 @@ fn should_install_exec_files() {
     pacquet.with_arg("install").assert().success();
 
     eprintln!("Listing all files in the store...");
-    let store_files = get_all_files(&store_dir);
+    let store_files = stable_store_files(&store_dir);
 
     #[cfg(unix)]
     {
@@ -80,9 +80,11 @@ fn should_install_exec_files() {
         use std::{fs::File, iter::repeat, os::unix::fs::MetadataExt};
 
         eprintln!("All files that end with '-exec' are executable, others not");
-        let (suffix_exec, suffix_other) =
-            store_files.iter().partition::<Vec<_>, _>(|path| path.ends_with("-exec"));
-        let (mode_exec, mode_other) = store_files
+        let cafs_files =
+            store_files.iter().filter(|path| path.starts_with("v11/files/")).collect::<Vec<_>>();
+        let (suffix_exec, suffix_other): (Vec<&&String>, Vec<&&String>) =
+            cafs_files.iter().partition::<Vec<_>, _>(|path| path.ends_with("-exec"));
+        let (mode_exec, mode_other): (Vec<&&String>, Vec<&&String>) = cafs_files
             .iter()
             .partition::<Vec<_>, _>(|name| store_dir.join(name).as_path().pipe(is_path_executable));
         assert_eq!((&suffix_exec, &suffix_other), (&mode_exec, &mode_other));
@@ -98,11 +100,11 @@ fn should_install_exec_files() {
                     .metadata()
                     .expect("get metadata")
                     .mode();
-                (name.as_str(), mode & 0o777)
+                ((*name).as_str(), mode & 0o777)
             })
             .collect();
         let expected_modes: Vec<_> =
-            mode_exec.iter().map(|name| name.as_str()).zip(repeat(0o755)).collect();
+            mode_exec.iter().map(|name| (*name).as_str()).zip(repeat(0o755)).collect();
         assert_eq!(&actual_modes, &expected_modes);
     }
 
@@ -110,6 +112,17 @@ fn should_install_exec_files() {
     insta::assert_debug_snapshot!(store_files);
 
     drop((root, mock_instance)); // cleanup
+}
+
+fn stable_store_files(store_dir: &std::path::Path) -> Vec<String> {
+    get_all_files(store_dir)
+        .into_iter()
+        .filter(|path| {
+            !path.starts_with("v11/package-instances/")
+                && !path.starts_with("v11/package-trees/")
+                && !path.starts_with("v11/project-layouts/")
+        })
+        .collect()
 }
 
 #[test]

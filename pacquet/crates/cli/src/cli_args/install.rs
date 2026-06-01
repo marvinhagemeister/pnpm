@@ -233,6 +233,16 @@ pub struct InstallArgs {
     /// lockfile. Applied to [`pacquet_config::Config::pnpr_server`].
     #[clap(long = "pnpr-server")]
     pub pnpr_server: Option<String>,
+
+    /// Restore and update an experimental project-local node_modules
+    /// layout cache. This is a pacquet-only performance experiment.
+    #[clap(long = "layout-cache")]
+    pub layout_cache: bool,
+
+    /// Namespace for the experimental layout cache. The validity key is
+    /// still computed by pacquet from lockfile and install settings.
+    #[clap(long = "layout-cache-namespace")]
+    pub layout_cache_namespace: Option<String>,
 }
 
 impl InstallArgs {
@@ -260,6 +270,8 @@ impl InstallArgs {
             // Read from `config.pnpr_server` (the CLI flag was already
             // merged in by the dispatch in `cli_args.rs`), not from here.
             pnpr_server: _,
+            layout_cache,
+            layout_cache_namespace,
         } = self;
 
         // `--prefer-frozen-lockfile` / `--no-prefer-frozen-lockfile`
@@ -353,6 +365,8 @@ impl InstallArgs {
             node_linker,
             lockfile_only,
             update_seed_policy: UpdateSeedPolicy::KeepAll,
+            layout_cache,
+            layout_cache_namespace,
         }
         .run::<Reporter>()
         .await
@@ -476,6 +490,8 @@ async fn install_via_pnpr<Reporter: self::Reporter + 'static>(
         node_linker: link.node_linker,
         lockfile_only: false,
         update_seed_policy: UpdateSeedPolicy::KeepAll,
+        layout_cache: false,
+        layout_cache_namespace: None,
     }
     .run::<Reporter>()
     .await
