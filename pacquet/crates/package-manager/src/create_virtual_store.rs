@@ -639,21 +639,6 @@ impl<'a> CreateVirtualStore<'a> {
 
         let import_method = config.package_import_method;
         if !is_hoisted {
-            use rayon::prelude::*;
-            // Driving the warm batch from inside an `async fn` means
-            // the `par_iter` blocks the calling tokio worker for the
-            // duration. On the production multi-thread runtime that's
-            // fine — `block_in_place` tells the runtime to migrate any
-            // other futures off this worker first, so async progress
-            // continues on the other workers — but `block_in_place`
-            // panics on `current_thread` runtimes, which is what
-            // `#[tokio::test]` defaults to. Detect the flavor and only
-            // call `block_in_place` when it's safe; on
-            // `current_thread` we fall back to a plain inline call,
-            // matching how the rest of the test suite already runs
-            // sync work directly on the test thread (Copilot review on
-            // <https://github.com/pnpm/pacquet/pull/292>).
-            //
             // Hoisted skips this batch entirely: no virtual-store slot
             // gets written, so there's no per-snapshot link work to
             // do — the CAS paths captured below are the only output
@@ -661,42 +646,30 @@ impl<'a> CreateVirtualStore<'a> {
             // `nodeLinker === 'hoisted'` guard at
             // <https://github.com/pnpm/pnpm/blob/94240bc046/installing/deps-restorer/src/index.ts#L411-L425>
             // which routes all link work into `linkHoistedModules`.
-            let warm_work = move || {
-                warm.par_iter().try_for_each(|(snapshot_key, snapshot, cas_paths)| {
-                    let package_id = snapshot_key.without_peer().to_string();
-                    emit_warm_snapshot_progress::<Reporter>(&package_id, requester);
+            let scheduler = crate::install_scheduler::InstallScheduler::current();
+            scheduler.run_fs_batch(&warm, |(snapshot_key, snapshot, cas_paths)| {
+                let package_id = snapshot_key.without_peer().to_string();
+                emit_warm_snapshot_progress::<Reporter>(&package_id, requester);
 
-                    crate::CreateVirtualDirBySnapshot {
-                        layout,
-                        cas_paths: cas_paths.as_ref(),
-                        import_method,
-                        logged_methods,
-                        requester,
-                        package_id: &package_id,
-                        package_tree_dir: Some(package_tree_dir(
-                            config.store_dir.root(),
-                            &package_id,
-                        )),
-                        package_key: snapshot_key,
-                        snapshot,
-                        skipped,
-                    }
-                    .run::<Reporter>()
-                    .map_err(|error| {
-                        CreateVirtualStoreError::InstallPackageBySnapshot(
-                            InstallPackageBySnapshotError::CreateVirtualDir(error),
-                        )
-                    })
+                crate::CreateVirtualDirBySnapshot {
+                    layout,
+                    cas_paths: cas_paths.as_ref(),
+                    import_method,
+                    logged_methods,
+                    requester,
+                    package_id: &package_id,
+                    package_tree_dir: Some(package_tree_dir(config.store_dir.root(), &package_id)),
+                    package_key: snapshot_key,
+                    snapshot,
+                    skipped,
+                }
+                .run::<Reporter>()
+                .map_err(|error| {
+                    CreateVirtualStoreError::InstallPackageBySnapshot(
+                        InstallPackageBySnapshotError::CreateVirtualDir(error),
+                    )
                 })
-            };
-            let on_multi_thread = tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-                handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-            });
-            if on_multi_thread {
-                tokio::task::block_in_place(warm_work)?;
-            } else {
-                warm_work()?;
-            }
+            })?;
         } else {
             // Hoisted still wants the progress reporter to fire so
             // `pnpm:progress imported`-style updates render the warm

@@ -13,7 +13,6 @@ use pacquet_package_manifest::DependencyGroup;
 use pacquet_reporter::{
     AddedRoot, DependencyType, LogEvent, LogLevel, Reporter, RootLog, RootMessage,
 };
-use rayon::prelude::*;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsStr,
@@ -433,7 +432,7 @@ fn link_one_importer<Reporter: self::Reporter>(
     // panicked the rayon worker on any FS failure. The full result
     // collection forces every task to settle before we surface a
     // single error.
-    entries.par_iter().try_for_each(|entry| -> Result<(), SymlinkDirectDependenciesError> {
+    crate::install_scheduler::InstallScheduler::current().run_fs_batch(&entries, |entry| {
         let ResolvedEntry { name, spec, group, name_str, target } = entry;
 
         symlink_package(target, &modules_dir.join(name_str)).map_err(|source| {

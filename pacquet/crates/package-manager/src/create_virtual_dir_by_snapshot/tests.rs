@@ -53,13 +53,6 @@ async fn run_emits_imported_event_after_import_indexed_dir() {
 
     EVENTS.lock().unwrap().clear();
 
-    // `tokio::task::block_in_place` matches how the production
-    // call-site (the `warm_work` closure in `CreateVirtualStore`)
-    // drives this from inside a multi-thread runtime; a
-    // `current_thread` runtime would panic on `block_in_place`,
-    // but `#[tokio::test]` defaults to single-thread, so we run
-    // `.run()` directly here. The function itself is sync — only
-    // the caller's runtime flavor matters.
     let layout = crate::VirtualStoreLayout::legacy(
         virtual_store_dir,
         pacquet_config::default_virtual_store_dir_max_length() as usize,

@@ -18,10 +18,10 @@
 //! graph and a fully-populated CAS index for every package, it
 //! materializes the tree.
 //!
-//! Concurrency uses [`rayon`]: the hierarchy walk parallelizes
-//! at each level (matching upstream's `await Promise.all(...)`
-//! per level), and `import_indexed_dir` itself is internally
-//! rayon-parallel over CAS entries.
+//! Concurrency goes through [`crate::install_scheduler::InstallScheduler`]:
+//! the hierarchy walk parallelizes filesystem work at each level (matching
+//! upstream's `await Promise.all(...)` per level), and the scheduler owns the
+//! current rayon-backed implementation detail.
 
 use crate::{
     DepHierarchy, DependenciesGraph, DependenciesGraphNode, ImportIndexedDirError,
@@ -33,8 +33,8 @@ use pacquet_cmd_shim::LinkBinsError;
 use pacquet_config::PackageImportMethod;
 use pacquet_lockfile::PkgIdWithPatchHash;
 use pacquet_reporter::Reporter;
-use rayon::prelude::*;
 use std::{
+    collections::BTreeMap,
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
@@ -66,7 +66,7 @@ pub struct LinkHoistedModulesOpts<'a> {
     /// Per-importer directory hierarchies, keyed by importer
     /// root. Single-importer installs have one entry keyed by
     /// `lockfile_dir`; workspace support will add more.
-    pub hierarchy: &'a std::collections::BTreeMap<PathBuf, DepHierarchy>,
+    pub hierarchy: &'a BTreeMap<PathBuf, DepHierarchy>,
     /// Pre-fetched CAS file index per package. The linker
     /// errors with [`LinkHoistedModulesError::MissingCasPaths`]
     /// when a graph node's `pkg_id_with_patch_hash` is missing
@@ -147,17 +147,16 @@ pub fn link_hoisted_modules<Reporter: self::Reporter>(
     opts: &LinkHoistedModulesOpts<'_>,
 ) -> Result<(), LinkHoistedModulesError> {
     remove_orphans(opts.graph, opts.prev_graph);
+    let scheduler = crate::install_scheduler::InstallScheduler::current();
 
     // Drive each importer's hierarchy in parallel — workspace
     // installs (Slice 9) will have multiple importers; the
     // single-importer case has one and rayon's overhead is
     // negligible.
-    opts.hierarchy
-        .par_iter()
-        .map(|(parent_dir, deps_hierarchy)| {
-            link_all_pkgs_in_order::<Reporter>(deps_hierarchy, parent_dir, opts)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let roots: Vec<_> = opts.hierarchy.iter().collect();
+    scheduler.run_fs_batch(&roots, |(parent_dir, deps_hierarchy)| {
+        link_all_pkgs_in_order::<Reporter>(deps_hierarchy, parent_dir, opts, &scheduler)
+    })?;
 
     Ok(())
 }
@@ -170,9 +169,12 @@ pub fn link_hoisted_modules<Reporter: self::Reporter>(
 fn remove_orphans(graph: &DependenciesGraph, prev_graph: Option<&DependenciesGraph>) {
     let Some(prev) = prev_graph else { return };
     let orphan_dirs: Vec<&PathBuf> = prev.keys().filter(|dir| !graph.contains_key(*dir)).collect();
-    orphan_dirs.par_iter().for_each(|dir| {
-        let _ = try_remove_dir(dir);
-    });
+    crate::install_scheduler::InstallScheduler::current().run_fs_batch_unchecked(
+        &orphan_dirs,
+        |dir| {
+            let _ = try_remove_dir(dir);
+        },
+    );
 }
 
 /// Single-directory rimraf with the same error-swallowing
@@ -193,35 +195,30 @@ fn try_remove_dir(dir: &Path) -> io::Result<()> {
 /// each `<parent>/node_modules/.bin`. Mirrors upstream's
 /// [`linkAllPkgsInOrder`](https://github.com/pnpm/pnpm/blob/94240bc046/installing/deps-restorer/src/linkHoistedModules.ts#L88-L153).
 ///
-/// Each level of the hierarchy is walked in parallel via
-/// rayon's [`IntoParallelRefIterator::par_iter`]. Children at the
-/// same level race against each other; the bin-link pass for
+/// Each level of the hierarchy is walked as a filesystem batch through
+/// [`crate::install_scheduler::InstallScheduler`]. Children at the
+/// same level can race against each other; the bin-link pass for
 /// `parent_dir/node_modules` runs only after every immediate
 /// child (and its subtree) has been imported, so the read of
 /// `<modules_dir>/<dep>/package.json` during bin linking always
 /// sees the fully-populated package.
-///
-/// [`IntoParallelRefIterator::par_iter`]: rayon::iter::IntoParallelRefIterator::par_iter
 fn link_all_pkgs_in_order<Reporter: self::Reporter>(
     hierarchy: &DepHierarchy,
     parent_dir: &Path,
     opts: &LinkHoistedModulesOpts<'_>,
+    scheduler: &crate::install_scheduler::InstallScheduler,
 ) -> Result<(), LinkHoistedModulesError> {
-    // Phase 2: import this level's packages + recurse into each
-    // one's children. `par_iter` is sufficient — the side effects
-    // are on disk and target disjoint directories.
-    hierarchy
-        .0
-        .par_iter()
-        .map(|(dir, sub_hierarchy)| {
-            let node = opts
-                .graph
-                .get(dir)
-                .ok_or_else(|| LinkHoistedModulesError::MissingGraphNode { dir: dir.clone() })?;
-            import_node::<Reporter>(node, opts)?;
-            link_all_pkgs_in_order::<Reporter>(sub_hierarchy, dir, opts)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // Phase 2: import this level's packages + recurse into each one's
+    // children. The side effects are on disk and target disjoint directories.
+    let children: Vec<_> = hierarchy.0.iter().collect();
+    scheduler.run_fs_batch(&children, |(dir, sub_hierarchy)| {
+        let node = opts
+            .graph
+            .get(*dir)
+            .ok_or_else(|| LinkHoistedModulesError::MissingGraphNode { dir: (*dir).clone() })?;
+        import_node::<Reporter>(node, opts)?;
+        link_all_pkgs_in_order::<Reporter>(sub_hierarchy, dir, opts, scheduler)
+    })?;
 
     // Phase 3: link bins of every immediate child under
     // `parent_dir/node_modules`. The keys of `hierarchy.0` are
