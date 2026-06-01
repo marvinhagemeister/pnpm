@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
+    time::Instant,
 };
 use tokio::sync::Semaphore;
 
@@ -28,7 +29,20 @@ impl InstallScheduler {
         F: Fn(&T) -> Result<(), E> + Send + Sync,
         E: Send,
     {
-        self.run_blocking(|| run_bounded_fs_batch(items, work))
+        let started = Instant::now();
+        let item_count = items.len();
+        let worker_count = cmp::min(fs_parallelism(), item_count);
+        let result = self.run_blocking(|| run_bounded_fs_batch(items, work));
+        tracing::debug!(
+            target: "pacquet::scheduler",
+            resource = "fs",
+            kind = "batch",
+            item_count,
+            worker_count,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "scheduler fs batch completed",
+        );
+        result
     }
 
     pub fn run_fs_batch_unchecked<T, F>(&self, items: &[T], work: F)
@@ -36,7 +50,19 @@ impl InstallScheduler {
         T: Sync,
         F: Fn(&T) + Send + Sync,
     {
-        self.run_blocking(|| run_bounded_fs_batch_unchecked(items, work))
+        let started = Instant::now();
+        let item_count = items.len();
+        let worker_count = cmp::min(fs_parallelism(), item_count);
+        self.run_blocking(|| run_bounded_fs_batch_unchecked(items, work));
+        tracing::debug!(
+            target: "pacquet::scheduler",
+            resource = "fs",
+            kind = "batch_unchecked",
+            item_count,
+            worker_count,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "scheduler fs batch completed",
+        );
     }
 
     pub async fn run_cpu<F, R>(&self, work: F) -> Result<R, tokio::task::JoinError>
@@ -44,8 +70,19 @@ impl InstallScheduler {
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
+        let wait_started = Instant::now();
         let _permit = cpu_semaphore().acquire().await.expect("cpu semaphore should stay open");
-        tokio::task::spawn_blocking(work).await
+        let wait_ms = wait_started.elapsed().as_secs_f64() * 1000.0;
+        let run_started = Instant::now();
+        let result = tokio::task::spawn_blocking(work).await;
+        tracing::debug!(
+            target: "pacquet::scheduler",
+            resource = "cpu",
+            wait_ms,
+            run_ms = run_started.elapsed().as_secs_f64() * 1000.0,
+            "scheduler cpu task completed",
+        );
+        result
     }
 
     pub async fn run_fs<F, R>(&self, work: F) -> Result<R, tokio::task::JoinError>
@@ -53,8 +90,19 @@ impl InstallScheduler {
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
+        let wait_started = Instant::now();
         let _permit = fs_semaphore().acquire().await.expect("fs semaphore should stay open");
-        tokio::task::spawn_blocking(work).await
+        let wait_ms = wait_started.elapsed().as_secs_f64() * 1000.0;
+        let run_started = Instant::now();
+        let result = tokio::task::spawn_blocking(work).await;
+        tracing::debug!(
+            target: "pacquet::scheduler",
+            resource = "fs",
+            wait_ms,
+            run_ms = run_started.elapsed().as_secs_f64() * 1000.0,
+            "scheduler fs task completed",
+        );
+        result
     }
 
     /// Run blocking work from either production's multi-thread tokio runtime or
