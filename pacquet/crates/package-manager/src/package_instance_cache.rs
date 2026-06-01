@@ -17,14 +17,22 @@ use std::{
     sync::atomic::AtomicU8,
 };
 
-pub(crate) fn package_instance_dir(
+pub(crate) struct PackageInstanceEntry {
+    pub dir: PathBuf,
+    pub fingerprint: String,
+}
+
+pub(crate) fn package_instance_entry(
     store_root: &Path,
     package_key: &PackageKey,
     cas_paths: &HashMap<String, PathBuf>,
-) -> PathBuf {
+) -> PackageInstanceEntry {
     let fingerprint = package_tree_fingerprint(cas_paths);
     let key = format!("v1\0{package_key}\0{fingerprint}");
-    store_root.join("package-instances").join(create_short_hash(&key))
+    PackageInstanceEntry {
+        dir: store_root.join("package-instances").join(create_short_hash(&key)),
+        fingerprint,
+    }
 }
 
 pub(crate) fn try_populate_from_package_instance<Reporter: self::Reporter>(
@@ -32,7 +40,7 @@ pub(crate) fn try_populate_from_package_instance<Reporter: self::Reporter>(
     import_method: PackageImportMethod,
     dir_path: &Path,
     cas_paths: &HashMap<String, PathBuf>,
-    package_instance_dir: &Path,
+    package_instance: &PackageInstanceEntry,
     package_key: &PackageKey,
     package_tree_dir: Option<&Path>,
 ) -> bool {
@@ -43,13 +51,14 @@ pub(crate) fn try_populate_from_package_instance<Reporter: self::Reporter>(
     let trace_instance =
         tracing::enabled!(target: "pacquet::package_instance", tracing::Level::DEBUG);
     let total_start = trace_instance.then(std::time::Instant::now);
-    let fingerprint_start = trace_instance.then(std::time::Instant::now);
-    let fingerprint = package_tree_fingerprint(cas_paths);
-    let fingerprint_ms = fingerprint_start.map(elapsed_ms);
 
     let sentinel_start = trace_instance.then(std::time::Instant::now);
-    let initialized =
-        has_matching_metadata(package_instance_dir, package_key, &fingerprint, cas_paths.len());
+    let initialized = has_matching_metadata(
+        &package_instance.dir,
+        package_key,
+        &package_instance.fingerprint,
+        cas_paths.len(),
+    );
     let sentinel_ms = sentinel_start.map(elapsed_ms);
 
     let build_start = trace_instance.then(std::time::Instant::now);
@@ -58,15 +67,15 @@ pub(crate) fn try_populate_from_package_instance<Reporter: self::Reporter>(
             logged_methods,
             import_method,
             cas_paths,
-            package_instance_dir,
+            &package_instance.dir,
             package_key,
             package_tree_dir,
-            &fingerprint,
+            &package_instance.fingerprint,
         )
     {
         tracing::debug!(
             target: "pacquet::package_instance",
-            ?package_instance_dir,
+            package_instance_dir = ?package_instance.dir,
             ?error,
             "failed to build package instance cache; falling back to package-tree import",
         );
@@ -74,7 +83,7 @@ pub(crate) fn try_populate_from_package_instance<Reporter: self::Reporter>(
     }
     let build_ms = build_start.map(elapsed_ms);
 
-    let files_dir = package_instance_dir.join("files");
+    let files_dir = package_instance.dir.join("files");
     let clone_start = trace_instance.then(std::time::Instant::now);
     match clone_package_tree(&files_dir, dir_path) {
         Ok(()) => {
@@ -87,7 +96,6 @@ pub(crate) fn try_populate_from_package_instance<Reporter: self::Reporter>(
                     ?dir_path,
                     file_count = cas_paths.len(),
                     initialized,
-                    fingerprint_ms = fingerprint_ms.unwrap_or_default(),
                     sentinel_ms = sentinel_ms.unwrap_or_default(),
                     build_ms = build_ms.unwrap_or_default(),
                     clone_ms = clone_ms.unwrap_or_default(),
