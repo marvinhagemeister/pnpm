@@ -5500,6 +5500,7 @@ async fn frozen_install_logs_existing_modules_cache_miss_reason() {
         supported_architectures: None,
         node_linker: pacquet_config::NodeLinker::Isolated,
         lockfile_only: false,
+        update_seed_policy: crate::UpdateSeedPolicy::KeepAll,
         layout_cache: false,
         layout_cache_namespace: None,
         resolved_packages: &Default::default(),
