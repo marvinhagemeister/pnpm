@@ -869,6 +869,23 @@ where
             return Ok(());
         }
 
+        if take_frozen_path
+            && let Some(reason) = existing_modules_cache_miss_reason(
+                lockfile,
+                current_lockfile.as_ref(),
+                &config.modules_dir,
+                config,
+                node_linker,
+                included,
+            )
+        {
+            Reporter::emit(&LogEvent::Pnpm(PnpmLog {
+                level: LogLevel::Info,
+                message: format!("Existing node_modules cache miss: {reason}"),
+                prefix: prefix.clone(),
+            }));
+        }
+
         let (hoisted_dependencies, hoisted_locations, frozen_skipped, fresh_lockfile): (
             HoistedDependencies,
             BTreeMap<String, Vec<String>>,
@@ -1383,18 +1400,104 @@ fn is_modules_yaml_consistent(
     node_linker: NodeLinker,
     included: IncludedDependencies,
 ) -> bool {
-    let Some(modules) = read_modules_manifest::<Host>(modules_dir).ok().flatten() else {
-        return false;
+    modules_yaml_consistency(modules_dir, config, node_linker, included).is_ok()
+}
+
+fn existing_modules_cache_miss_reason(
+    wanted_lockfile: Option<&Lockfile>,
+    current_lockfile: Option<&Lockfile>,
+    modules_dir: &Path,
+    config: &Config,
+    node_linker: NodeLinker,
+    included: IncludedDependencies,
+) -> Option<String> {
+    if !modules_dir.exists() {
+        return None;
+    }
+
+    let wanted_lockfile = wanted_lockfile?;
+    let Some(current_lockfile) = current_lockfile else {
+        let current_lockfile_path = config.virtual_store_dir.join(Lockfile::CURRENT_FILE_NAME);
+        return Some(format!("missing current lockfile at {}", current_lockfile_path.display()));
     };
-    modules.layout_version == Some(LayoutVersion)
-        && modules.node_linker == Some(map_node_linker(&node_linker))
-        && modules.included == included
-        && modules.hoist_pattern == config.hoist_pattern
-        && modules.public_hoist_pattern == config.public_hoist_pattern
-        && modules.virtual_store_dir_max_length == config.virtual_store_dir_max_length
-        && modules.store_dir == config.store_dir.display().to_string()
-        && modules.virtual_store_dir
-            == config.effective_virtual_store_dir().to_string_lossy().as_ref()
+
+    if wanted_lockfile != current_lockfile {
+        return Some("current lockfile differs from wanted lockfile".to_string());
+    }
+
+    modules_yaml_consistency(modules_dir, config, node_linker, included)
+        .err()
+        .map(|reason| format!(".modules.yaml {reason}"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModulesYamlInconsistency {
+    MissingOrUnreadable,
+    LayoutVersion,
+    NodeLinker,
+    Included,
+    HoistPattern,
+    PublicHoistPattern,
+    VirtualStoreDirMaxLength,
+    StoreDir,
+    VirtualStoreDir,
+}
+
+impl std::fmt::Display for ModulesYamlInconsistency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingOrUnreadable => f.write_str("is missing or unreadable"),
+            Self::LayoutVersion => f.write_str("layoutVersion differs from current config"),
+            Self::NodeLinker => f.write_str("nodeLinker differs from current config"),
+            Self::Included => f.write_str("included dependency groups differ from current install"),
+            Self::HoistPattern => f.write_str("hoistPattern differs from current config"),
+            Self::PublicHoistPattern => {
+                f.write_str("publicHoistPattern differs from current config")
+            }
+            Self::VirtualStoreDirMaxLength => {
+                f.write_str("virtualStoreDirMaxLength differs from current config")
+            }
+            Self::StoreDir => f.write_str("storeDir differs from current config"),
+            Self::VirtualStoreDir => f.write_str("virtualStoreDir differs from current config"),
+        }
+    }
+}
+
+fn modules_yaml_consistency(
+    modules_dir: &Path,
+    config: &Config,
+    node_linker: NodeLinker,
+    included: IncludedDependencies,
+) -> Result<(), ModulesYamlInconsistency> {
+    let Some(modules) = read_modules_manifest::<Host>(modules_dir).ok().flatten() else {
+        return Err(ModulesYamlInconsistency::MissingOrUnreadable);
+    };
+    if modules.layout_version != Some(LayoutVersion) {
+        return Err(ModulesYamlInconsistency::LayoutVersion);
+    }
+    if modules.node_linker != Some(map_node_linker(&node_linker)) {
+        return Err(ModulesYamlInconsistency::NodeLinker);
+    }
+    if modules.included != included {
+        return Err(ModulesYamlInconsistency::Included);
+    }
+    if modules.hoist_pattern != config.hoist_pattern {
+        return Err(ModulesYamlInconsistency::HoistPattern);
+    }
+    if modules.public_hoist_pattern != config.public_hoist_pattern {
+        return Err(ModulesYamlInconsistency::PublicHoistPattern);
+    }
+    if modules.virtual_store_dir_max_length != config.virtual_store_dir_max_length {
+        return Err(ModulesYamlInconsistency::VirtualStoreDirMaxLength);
+    }
+    if modules.store_dir != config.store_dir.display().to_string() {
+        return Err(ModulesYamlInconsistency::StoreDir);
+    }
+    if modules.virtual_store_dir != config.effective_virtual_store_dir().to_string_lossy().as_ref()
+    {
+        return Err(ModulesYamlInconsistency::VirtualStoreDir);
+    }
+    Ok(())
 }
 
 /// Assemble the [`Modules`] payload for [`write_modules_manifest`].

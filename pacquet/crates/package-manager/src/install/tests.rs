@@ -5408,6 +5408,126 @@ async fn frozen_install_short_circuits_when_modules_and_lockfile_are_consistent(
     drop(dir);
 }
 
+/// When restored `node_modules` exists but the no-op gate cannot trust
+/// it, the frozen path should log the miss reason before falling back
+/// to regular materialization. CI cache users need that reason to tell
+/// stale caches apart from real install work.
+#[tokio::test]
+async fn frozen_install_logs_existing_modules_cache_miss_reason() {
+    static EVENTS: Mutex<Vec<LogEvent>> = Mutex::new(Vec::new());
+    EVENTS.lock().unwrap().clear();
+
+    struct RecordingReporter;
+    impl Reporter for RecordingReporter {
+        fn emit(event: &LogEvent) {
+            EVENTS.lock().unwrap().push(event.clone());
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    let store_dir = dir.path().join("pacquet-store");
+    let project_root = dir.path().join("project");
+    let modules_dir = project_root.join("node_modules");
+    let virtual_store_dir = modules_dir.join(".pacquet");
+    let sibling_dir = dir.path().join("sibling");
+
+    std::fs::create_dir_all(&project_root).expect("create project root");
+    std::fs::create_dir_all(&sibling_dir).expect("create sibling root");
+    std::fs::write(sibling_dir.join("package.json"), r#"{"name":"sibling","version":"1.0.0"}"#)
+        .expect("write sibling manifest");
+
+    let manifest_path = project_root.join("package.json");
+    let mut manifest = PackageManifest::create_if_needed(manifest_path).unwrap();
+    manifest.add_dependency("sibling", "link:../sibling", DependencyGroup::Prod).unwrap();
+    manifest.save().unwrap();
+
+    let mut config = Config::new();
+    config.lockfile = false;
+    config.store_dir = store_dir.clone().into();
+    config.modules_dir = modules_dir.clone();
+    config.virtual_store_dir = virtual_store_dir.clone();
+    let config = config.leak();
+
+    let lockfile: Lockfile = serde_saphyr::from_str(text_block! {
+        "lockfileVersion: '9.0'"
+        "importers:"
+        "  .:"
+        "    dependencies:"
+        "      sibling:"
+        "        specifier: link:../sibling"
+        "        version: link:../sibling"
+        "packages: {}"
+        "snapshots: {}"
+    })
+    .expect("parse minimal v9 lockfile with one link dep");
+
+    let included = pacquet_modules_yaml::IncludedDependencies {
+        dependencies: true,
+        dev_dependencies: false,
+        optional_dependencies: false,
+    };
+
+    let stale_modules = Modules {
+        layout_version: Some(LayoutVersion),
+        node_linker: Some(NodeLinker::Hoisted),
+        included,
+        hoist_pattern: config.hoist_pattern.clone(),
+        public_hoist_pattern: config.public_hoist_pattern.clone(),
+        store_dir: config.store_dir.display().to_string(),
+        virtual_store_dir: config.effective_virtual_store_dir().to_string_lossy().into_owned(),
+        virtual_store_dir_max_length: config.virtual_store_dir_max_length,
+        ..Default::default()
+    };
+    write_modules_manifest::<Host>(&modules_dir, stale_modules).expect("seed stale .modules.yaml");
+    lockfile.save_current_to_virtual_store_dir(&virtual_store_dir).expect("seed current lockfile");
+
+    Install {
+        tarball_mem_cache: Default::default(),
+        http_client: &Default::default(),
+        http_client_arc: std::sync::Arc::new(Default::default()),
+        config,
+        manifest: &manifest,
+        lockfile: Some(&lockfile),
+        lockfile_path: None,
+        dependency_groups: [DependencyGroup::Prod],
+        frozen_lockfile: true,
+        prefer_frozen_lockfile: None,
+        ignore_manifest_check: false,
+        skip_runtimes: false,
+        trust_lockfile: true,
+        update_checksums: false,
+        is_full_install: true,
+        supported_architectures: None,
+        node_linker: pacquet_config::NodeLinker::Isolated,
+        lockfile_only: false,
+        layout_cache: false,
+        layout_cache_namespace: None,
+        resolved_packages: &Default::default(),
+    }
+    .run::<RecordingReporter>()
+    .await
+    .expect("stale cache should fall back to materialization and succeed");
+
+    let captured = EVENTS.lock().unwrap();
+    assert!(
+        captured.iter().any(|event| matches!(
+            event,
+            LogEvent::Pnpm(log)
+                if log.message
+                    == "Existing node_modules cache miss: .modules.yaml nodeLinker differs from current config"
+        )),
+        "the stale .modules.yaml reason should be emitted before the fallback install",
+    );
+
+    let sibling_link = modules_dir.join("sibling");
+    assert!(
+        std::fs::symlink_metadata(&sibling_link).is_ok(),
+        "fallback materialization should still run after logging the cache miss",
+    );
+
+    drop(dir);
+}
+
 /// Port of pnpm's `optimisticRepeatInstall` short-circuit
 /// (`installing/commands/src/installDeps.ts:179-194`). When nothing
 /// has changed since the previous successful install, `Install::run`
