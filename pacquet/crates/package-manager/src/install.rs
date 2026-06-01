@@ -1461,7 +1461,7 @@ fn build_modules_manifest(
         // RFC 1123 / `toUTCString()` format, matching upstream's
         // `new Date().toUTCString()` at line 1622.
         pruned_at: httpdate::fmt_http_date(SystemTime::now()),
-        registries: Some(BTreeMap::from([("default".to_string(), config.registry.clone())])),
+        registries: Some(config.registry_map()),
         // `iter_installability` excludes fetch-failure entries so they
         // don't get persisted across installs — matches upstream's
         // silent swallow of optional fetch failures at
@@ -1603,9 +1603,9 @@ fn build_project_manifests_list<'a>(
 /// [`getWorkspacePackagesByDirectory`](https://github.com/pnpm/pnpm/blob/ef87f3ccff/installing/context/src/index.ts#L160)
 /// passes into `resolveDependencies` — same name/version index, same
 /// per-project `WorkspacePackage` shape (`{ rootDir, manifest }`).
-/// Projects whose manifest lacks a name or version are silently
-/// skipped; upstream's manifest reader emits a separate warning that
-/// pacquet doesn't carry through here.
+/// Projects whose manifest lacks a name are silently skipped. A
+/// project with no version is indexed at `0.0.0`, matching pnpm's
+/// Yarn-compatibility behavior for private workspace packages.
 fn build_workspace_packages_map(
     projects: Option<&[pacquet_workspace::Project]>,
 ) -> Option<pacquet_resolving_resolver_base::WorkspacePackages> {
@@ -1613,9 +1613,11 @@ fn build_workspace_packages_map(
     let mut map: pacquet_resolving_resolver_base::WorkspacePackages =
         std::collections::BTreeMap::new();
     for project in projects {
-        let name = manifest_string_field(&project.manifest, "name");
-        let version = manifest_string_field(&project.manifest, "version");
-        let (Some(name), Some(version)) = (name, version) else { continue };
+        let Some(name) = manifest_string_field(&project.manifest, "name") else {
+            continue;
+        };
+        let version = manifest_string_field(&project.manifest, "version")
+            .unwrap_or_else(|| "0.0.0".to_string());
         map.entry(name).or_default().insert(
             version,
             pacquet_resolving_resolver_base::WorkspacePackage {

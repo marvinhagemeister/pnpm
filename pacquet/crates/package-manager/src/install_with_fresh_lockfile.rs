@@ -453,8 +453,7 @@ impl<'a, DependencyGroupList> InstallWithFreshLockfile<'a, DependencyGroupList> 
         // this call so every per-package resolve reuses a single
         // packument per `(registry, name)` pair, then dropped before
         // the install pass begins.
-        let mut registries = HashMap::new();
-        registries.insert("default".to_string(), config.registry.clone());
+        let registries: HashMap<String, String> = config.registry_map().into_iter().collect();
 
         // User-supplied named-registry aliases from
         // `pnpm-workspace.yaml#namedRegistries`. `merge_named_registries`

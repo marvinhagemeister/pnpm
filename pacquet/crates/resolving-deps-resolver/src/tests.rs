@@ -2020,6 +2020,29 @@ mod optional_propagation {
         );
     }
 
+    #[tokio::test]
+    async fn unresolved_optional_dep_is_skipped() {
+        let resolver = StubResolver { table: HashMap::new(), calls: Mutex::new(Vec::new()) };
+        let (_tmp, manifest) =
+            manifest_with_groups(serde_json::json!({}), serde_json::json!({ "missing": "1.0.0" }));
+
+        let tree = resolve_dependency_tree(
+            &resolver,
+            &manifest,
+            [DependencyGroup::Prod, DependencyGroup::Optional],
+            ResolveDependencyTreeOptions {
+                base_opts: ResolveOptions::default(),
+                patched_dependencies: None,
+                manifest_hook: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(tree.direct.is_empty());
+        assert!(tree.packages.is_empty());
+    }
+
     /// A transitive dep reached only through an `optionalDependencies`
     /// edge inherits the flag: `current_is_optional` propagates down
     /// the recursion (`wanted.optional || parent.optional`) so every

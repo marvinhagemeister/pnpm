@@ -22,6 +22,26 @@ fn extract_separates_config_tokens_from_argv() {
 }
 
 #[test]
+fn scoped_registry_overrides_are_applied() {
+    let (overrides, remaining) = ConfigOverrides::extract(argv([
+        "pacquet",
+        "--config.@shopify-internal:registry=https://npm.shopify.io/node",
+        "install",
+    ]));
+    assert_eq!(remaining, argv(["pacquet", "install"]));
+    let mut config = Config::default();
+    overrides.apply(&mut config);
+    assert_eq!(
+        config.scoped_registries.get("@shopify-internal").map(String::as_str),
+        Some("https://npm.shopify.io/node/")
+    );
+    assert_eq!(
+        config.registry_for_package_name("@shopify-internal/address"),
+        "https://npm.shopify.io/node/"
+    );
+}
+
+#[test]
 fn unknown_keys_are_dropped_silently() {
     let (overrides, remaining) =
         ConfigOverrides::extract(argv(["pacquet", "--config.unknown-key=whatever", "install"]));
@@ -48,6 +68,20 @@ fn last_value_wins_for_repeated_keys() {
     let mut config = Config::default();
     overrides.apply(&mut config);
     assert_eq!(config.registry, "https://second.test/");
+}
+
+#[test]
+fn last_value_wins_for_repeated_scoped_registry_keys() {
+    let (overrides, _) = ConfigOverrides::extract(argv([
+        "--config.@shopify-internal:registry=https://first.test/",
+        "--config.@shopify-internal:registry=https://second.test/",
+    ]));
+    let mut config = Config::default();
+    overrides.apply(&mut config);
+    assert_eq!(
+        config.scoped_registries.get("@shopify-internal").map(String::as_str),
+        Some("https://second.test/")
+    );
 }
 
 #[test]

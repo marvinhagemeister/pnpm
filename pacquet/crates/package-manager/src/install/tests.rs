@@ -1,4 +1,4 @@
-use super::{Install, InstallError, load_workspace_projects};
+use super::{Install, InstallError, build_workspace_packages_map, load_workspace_projects};
 use pacquet_config::Config;
 use pacquet_lockfile::Lockfile;
 use pacquet_modules_yaml::{
@@ -23,6 +23,26 @@ use pipe_trait::Pipe;
 use std::{fs, sync::Mutex};
 use tempfile::tempdir;
 use text_block_macros::text_block;
+
+#[test]
+fn workspace_package_map_indexes_versionless_packages_as_zero() {
+    let dir = tempdir().unwrap();
+    let scripts_dir = dir.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("mkdir scripts");
+    fs::write(scripts_dir.join("package.json"), r#"{"name":"@admin-web/scripts","private":true}"#)
+        .expect("write scripts package.json");
+    let manifest = PackageManifest::from_path(scripts_dir.join("package.json")).unwrap();
+    let project = pacquet_workspace::Project { root_dir: scripts_dir.clone(), manifest };
+
+    let workspace_packages = build_workspace_packages_map(Some(&[project])).unwrap();
+
+    assert!(
+        workspace_packages
+            .get("@admin-web/scripts")
+            .is_some_and(|versions| versions.contains_key("0.0.0")),
+        "private versionless workspace packages must still resolve via workspace:*"
+    );
+}
 
 #[test]
 fn workspace_without_packages_field_enumerates_root_only() {

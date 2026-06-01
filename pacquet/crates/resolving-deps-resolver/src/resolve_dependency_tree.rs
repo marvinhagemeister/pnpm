@@ -849,6 +849,9 @@ where
                     ResolveDependencyTreeError::Resolve(err.to_string())
                 })?;
             let Some(result_inner) = result.as_mut() else {
+                if current_is_optional {
+                    return Ok(None);
+                }
                 return Err(ResolveDependencyTreeError::SpecNotSupported {
                     specifier: render_specifier(&wanted),
                 });
