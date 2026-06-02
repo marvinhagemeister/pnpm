@@ -6391,6 +6391,8 @@ async fn install_with_pnpmfile(
         lockfile_only: false,
         resolved_packages: &Default::default(),
         update_seed_policy: crate::UpdateSeedPolicy::KeepAll,
+        layout_cache: false,
+        layout_cache_namespace: None,
     }
     .run::<SilentReporter>()
     .await
